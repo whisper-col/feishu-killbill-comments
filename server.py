@@ -67,25 +67,115 @@ async def fetch_task():
         info = await v.get_info()
         monitor_state.oid = info['aid']
         monitor_state.title = info['title']
+        print(f"Video Info: OID={monitor_state.oid}, Title={monitor_state.title}")
+        
+        await manager.broadcast({
+            "type": "clear_comments"  # Clear previous video's comments
+        })
         
         await manager.broadcast({
             "type": "status", 
             "msg": f"已连接视频: {monitor_state.title}",
+            "title": monitor_state.title,
             "level": "success"
         })
         
-        # Init last_rpid
-        init_data = await comment.get_comments(
-            oid=monitor_state.oid, 
-            type_=comment.CommentResourceType.VIDEO, 
-            order=comment.OrderType.TIME, 
-            page_index=1,
-            credential=credential
-        )
-        if init_data['replies']:
-            monitor_state.last_rpid = init_data['replies'][0]['rpid']
+        # Fetch ALL history comments using page-based API
+        all_replies = []
+        page = 1
+        max_pages = 100  # Safety limit (100 pages * ~20 comments = 2000 comments max)
+        
+        await manager.broadcast({
+            "type": "status", 
+            "msg": "正在加载历史评论...",
+            "level": "info"
+        })
+        
+        while page <= max_pages:
+            try:
+                # Use old get_comments with page_index for reliable pagination
+                page_data = await comment.get_comments(
+                    oid=monitor_state.oid, 
+                    type_=comment.CommentResourceType.VIDEO, 
+                    order=comment.OrderType.LIKE,  # LIKE to get all, we'll sort by time later
+                    page_index=page,
+                    credential=credential
+                )
+                
+                replies = page_data.get('replies') or []
+                page_info = page_data.get('page', {})
+                total_count = page_info.get('count', 0)
+                
+                if not replies:
+                    print(f"No more comments at page {page}")
+                    break
+                    
+                all_replies.extend(replies)
+                print(f"Page {page}: fetched {len(replies)} comments. Total: {len(all_replies)}/{total_count}")
+                
+                # Check if we've got all comments
+                if len(all_replies) >= total_count:
+                    print("Got all comments!")
+                    break
+                
+                page += 1
+                
+                # Small delay to avoid rate limiting
+                await asyncio.sleep(0.3)
+                
+            except Exception as e:
+                print(f"Error fetching page {page}: {e}")
+                import traceback
+                traceback.print_exc()
+                break
+        
+        print(f"Total history comments fetched: {len(all_replies)}")
+        
+        if all_replies:
+            # Sort by time (ctime) - oldest first for processing
+            all_replies.sort(key=lambda x: x['ctime'])
+            
+            # Set last_rpid to the newest comment (last after sorting by time)
+            monitor_state.last_rpid = max(r['rpid'] for r in all_replies)
+            print(f"Set last_rpid to {monitor_state.last_rpid}")
+            
+            # Process comments - already sorted oldest to newest
+            initial_comments = []
+            for r in all_replies:
+                try:
+                    info = {
+                        'rpid': r['rpid'],
+                        'user': r['member']['uname'],
+                        'mid': r['member']['mid'],
+                        'avatar': r['member']['avatar'],
+                        'content': r['content']['message'],
+                        'time': datetime.datetime.fromtimestamp(r['ctime']).strftime('%Y-%m-%d %H:%M:%S'),
+                        'level': r['member']['level_info']['current_level']
+                    }
+                    initial_comments.append(info)
+                except Exception as e:
+                    print(f"Error parsing comment: {e}")
+                    continue
+            
+            print(f"Broadcasting {len(initial_comments)} history comments.")
+            await manager.broadcast({
+                "type": "new_comments", 
+                "data": initial_comments
+            })
+            
+            await manager.broadcast({
+                "type": "status", 
+                "msg": f"已加载 {len(initial_comments)} 条历史评论，开始实时监控...",
+                "level": "success"
+            })
         else:
+            print("No history comments found.")
             monitor_state.last_rpid = 0
+            await manager.broadcast({
+                "type": "status", 
+                "msg": "暂无历史评论，开始实时监控...",
+                "level": "info"
+            })
             
     except Exception as e:
         await manager.broadcast({"type": "status", "msg": f"初始化失败: {str(e)}", "level": "error"})
@@ -94,14 +184,15 @@ async def fetch_task():
 
     while monitor_state.running:
         try:
-            data = await comment.get_comments(
+            # Use the new lazy API for real-time polling too
+            data = await comment.get_comments_lazy(
                 oid=monitor_state.oid, 
                 type_=comment.CommentResourceType.VIDEO, 
                 order=comment.OrderType.TIME, 
-                page_index=1,
+                offset="",  # Always get latest
                 credential=credential
             )
-            replies = data.get('replies', [])
+            replies = data.get('replies') or []
             
             new_comments = []
             if replies:
@@ -128,9 +219,16 @@ async def fetch_task():
                 
                 # Send to frontend (reversed to match chronological order usually preferred in logs, 
                 # but frontend can handle prepending. Let's send list and let frontend handle)
+                # Send to frontend
+                # We want to send them such that they appear correct.
+                # new_comments was built by appending [Newest...Newer_than_last] (API returns Newest -> Oldest)
+                # API Loop: r in replies (Newest first).
+                # new_comments.append(r) -> [Newest, NextNewest...]
+                # We need to reverse this too for the same reason.
+                
                 await manager.broadcast({
                     "type": "new_comments", 
-                    "data": new_comments
+                    "data": list(reversed(new_comments))
                 })
                 
         except Exception as e:

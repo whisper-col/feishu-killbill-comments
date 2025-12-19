@@ -1,11 +1,16 @@
 const bvidInput = document.getElementById('bvid');
 const sessdataInput = document.getElementById('sessdata');
+const buvid3Input = document.getElementById('buvid3');
+const biliJctInput = document.getElementById('bili_jct');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 const statusText = document.getElementById('statusText');
 const targetTitle = document.getElementById('targetTitle');
 const monitorBadge = document.getElementById('monitorBadge');
 const commentList = document.getElementById('commentList');
+const uploadBtn = document.getElementById('uploadBtn');
+const cookieFile = document.getElementById('cookieFile');
+const cookieStatus = document.getElementById('cookieStatus');
 
 let ws = null;
 let isRunning = false;
@@ -38,6 +43,9 @@ function handleMessage(msg) {
             break;
         case 'status':
             statusText.textContent = msg.msg;
+            if (msg.title) {
+                targetTitle.textContent = msg.title;
+            }
             if (msg.level === 'error') {
                 statusText.style.color = '#ff4757';
                 updateRunningState(false);
@@ -49,6 +57,9 @@ function handleMessage(msg) {
             break;
         case 'new_comments':
             renderComments(msg.data);
+            break;
+        case 'clear_comments':
+            commentList.innerHTML = '<div class="empty-state">正在加载评论...</div>';
             break;
     }
 }
@@ -105,9 +116,6 @@ function escapeHtml(text) {
 }
 
 // Cookie Handling
-const uploadBtn = document.getElementById('uploadBtn');
-const cookieFile = document.getElementById('cookieFile');
-const cookieStatus = document.getElementById('cookieStatus');
 
 uploadBtn.addEventListener('click', () => cookieFile.click());
 
@@ -150,36 +158,93 @@ cookieFile.addEventListener('change', (e) => {
 });
 
 // API Calls
-startBtn.addEventListener('click', async () => {
-    const sessdata = document.getElementById('sessdata').value;
-    const buvid3 = document.getElementById('buvid3').value;
-    const bili_jct = document.getElementById('bili_jct').value;
+// Load saved data on startup
+const savedBvid = localStorage.getItem('bilibili_monitor_bvid');
+const savedCookie = localStorage.getItem('bilibili_monitor_cookie');
 
-    if (!sessdata) {
-        alert("请先导入包含 SESSDATA 的 Cookie JSON 文件！");
+if (savedBvid) {
+    bvidInput.value = savedBvid;
+}
+
+if (savedCookie) {
+    try {
+        const parsed = JSON.parse(savedCookie);
+        sessdataInput.value = parsed.sessdata || '';
+        buvid3Input.value = parsed.buvid3 || '';
+        biliJctInput.value = parsed.bili_jct || '';
+
+        cookieStatus.style.display = 'block';
+        cookieStatus.textContent = '✓ 已加载上次使用的 Cookie';
+        cookieStatus.style.color = '#2ecc71';
+
+        uploadBtn.textContent = "✅ 已恢复 Cookie";
+        uploadBtn.style.background = "#2ecc71";
+    } catch (e) {
+        console.error('Failed to load saved cookie', e);
+    }
+}
+
+startBtn.addEventListener('click', async () => {
+    let bvid = bvidInput.value.trim();
+
+    // Extract BVID from URL if full link is pasted
+    // Regex matches BV followed by alphanumeric chars, ending at ? or / or end of string
+    const bvMatch = bvid.match(/(BV[a-zA-Z0-9]+)/);
+    if (bvMatch) {
+        bvid = bvMatch[1];
+        bvidInput.value = bvid; // Auto-correct input field
+    }
+
+    if (!bvid) {
+        alert('请输入 BVID');
         return;
     }
 
+    const sessdata = sessdataInput.value.trim();
+    const buvid3 = buvid3Input.value.trim();
+    const bili_jct = biliJctInput.value.trim();
+
+    if (!sessdata) {
+        alert('请先加载 Cookie JSON 文件');
+        return;
+    }
+
+    // Save to localStorage
+    localStorage.setItem('bilibili_monitor_bvid', bvid);
+    localStorage.setItem('bilibili_monitor_cookie', JSON.stringify({
+        sessdata, buvid3, bili_jct
+    }));
+
     statusText.textContent = "正在启动...";
     try {
-        const res = await fetch('/api/start', {
+        const response = await fetch('/api/start', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json'
+            },
             body: JSON.stringify({
-                bvid: bvidInput.value,
-                sessdata: sessdata,
-                buvid3: buvid3,
-                bili_jct: bili_jct
+                bvid,
+                sessdata,
+                buvid3,
+                bili_jct
             })
         });
-        const data = await res.json();
+
+        const data = await response.json();
         if (data.status === 'started') {
             updateRunningState(true);
         } else if (data.status === 'already_running') {
             alert("监控已在运行中");
+        } else {
+            updateRunningState(false);
+            statusText.textContent = `启动失败: ${data.message || '未知错误'}`;
+            statusText.style.color = '#ff4757';
         }
-    } catch (e) {
-        statusText.textContent = "启动失败: " + e;
+    } catch (error) {
+        console.error('Error:', error);
+        updateRunningState(false);
+        statusText.textContent = '连接后端失败';
+        statusText.style.color = '#ff4757';
     }
 });
 
