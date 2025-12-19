@@ -1,0 +1,281 @@
+:root {
+    --bg-color: #0f1115;
+    --card-bg: #181b21;
+    --sidebar-bg: #14161a;
+    --text-primary: #e0e6ed;
+    --text-secondary: #9499a0;
+    --primary-color: #00aeec;
+    --primary-hover: #40c5f1;
+    --danger-color: #ff4757;
+    --border-color: #2a2d35;
+    --font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background-color: var(--bg-color);
+    color: var(--text-primary);
+    font-family: var(--font-family);
+    height: 100vh;
+    overflow: hidden;
+}
+
+.container {
+    display: flex;
+    height: 100%;
+}
+
+/* Sidebar */
+.sidebar {
+    width: 320px;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--border-color);
+    padding: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+}
+
+.logo h2 {
+    color: var(--primary-color);
+    margin-bottom: 4px;
+}
+
+.logo span {
+    font-size: 0.9em;
+    color: var(--text-secondary);
+}
+
+.form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin-bottom: 20px;
+}
+
+.form-group label {
+    font-size: 0.9em;
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+.form-group input {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    padding: 12px;
+    border-radius: 8px;
+    color: var(--text-primary);
+    font-size: 1em;
+    outline: none;
+    transition: 0.2s;
+}
+
+.form-group input:focus {
+    border-color: var(--primary-color);
+}
+
+.form-group small {
+    font-size: 0.8em;
+    color: #666;
+}
+
+.actions {
+    display: flex;
+    gap: 12px;
+}
+
+.btn {
+    flex: 1;
+    padding: 12px;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    font-weight: 600;
+    transition: 0.2s;
+    opacity: 0.9;
+}
+
+.btn:hover:not(:disabled) {
+    opacity: 1;
+    transform: translateY(-1px);
+}
+
+.btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    background-color: var(--card-bg);
+    color: var(--text-secondary);
+}
+
+.primary {
+    background-color: var(--primary-color);
+    color: white;
+}
+
+.danger {
+    background-color: var(--danger-color);
+    color: white;
+}
+
+.status-panel {
+    margin-top: auto;
+    background: var(--card-bg);
+    padding: 16px;
+    border-radius: 12px;
+    border: 1px solid var(--border-color);
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 8px;
+    font-size: 0.9em;
+}
+
+.status-item:last-child {
+    margin-bottom: 0;
+}
+
+.status-item .label {
+    color: var(--text-secondary);
+}
+
+/* Main Content */
+.main-content {
+    flex: 1;
+    padding: 24px 40px;
+    overflow-y: hidden;
+    display: flex;
+    flex-direction: column;
+}
+
+.stream-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 24px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.badge {
+    padding: 6px 12px;
+    border-radius: 20px;
+    font-size: 0.8em;
+    font-weight: 600;
+    background: var(--card-bg);
+    color: var(--text-secondary);
+}
+
+.badge.active {
+    background: rgba(0, 174, 236, 0.15);
+    color: var(--primary-color);
+}
+
+.comment-list {
+    flex: 1;
+    overflow-y: auto;
+    padding-right: 10px;
+}
+
+/* Custom Scrollbar */
+.comment-list::-webkit-scrollbar {
+    width: 6px;
+}
+
+.comment-list::-webkit-scrollbar-thumb {
+    background-color: var(--border-color);
+    border-radius: 3px;
+}
+
+.empty-state {
+    text-align: center;
+    color: var(--text-secondary);
+    margin-top: 100px;
+    opacity: 0.5;
+}
+
+/* Comment Card */
+.comment-card {
+    display: flex;
+    gap: 16px;
+    padding: 20px;
+    background: var(--card-bg);
+    border-radius: 12px;
+    margin-bottom: 16px;
+    border: 1px solid var(--border-color);
+    animation: slideUp 0.4s ease-out;
+}
+
+@keyframes slideUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--border-color);
+}
+
+.content-wrapper {
+    flex: 1;
+}
+
+.header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+}
+
+.username {
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.level {
+    font-size: 0.75em;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: #FF6699;
+    color: white;
+}
+
+.time {
+    margin-left: auto;
+    font-size: 0.85em;
+    color: var(--text-secondary);
+}
+
+.message {
+    color: var(--text-primary);
+    line-height: 1.6;
+    font-size: 0.95em;
+}
+
+.secondary {
+    background-color: var(--card-bg);
+    color: var(--text-primary);
+    border: 1px solid var(--border-color);
+    text-align: center;
+}
+
+.secondary:hover {
+    border-color: var(--primary-color);
+    color: var(--primary-color);
+}
