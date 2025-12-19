@@ -7,4 +7,26 @@ wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
+
+# uv lock file (optional, can be committed)
+# uv.lock
+
+# Node.js (worker-api)
+node_modules/
+.wrangler/
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (never commit)
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
