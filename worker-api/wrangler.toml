@@ -1,0 +1,7 @@
+name = "feishu"
+main = "src/worker.ts"
+# 必须使用较新的日期来开启 Node.js 兼容性
+compatibility_date = "2025-12-19" 
+
+# 开启 2025 年标准的 Node.js 兼容层
+compatibility_flags = [ "nodejs_compat" ]

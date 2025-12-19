@@ -64,12 +64,21 @@ class ConfigRequest(BaseModel):
 
 # ==================== Logic ====================
 
-def save_comments_to_mongodb(comments_data: list, bvid: str, oid: int):
+def save_comments_to_mongodb(comments_data: list, bvid: str, oid: int, title: str = ""):
     """
     Save comments to MongoDB with upsert (avoid duplicates)
+    Stores in a specific collection: comments_{bvid}
+    Also updates video_metadata collection
     """
     if not comments_data:
         return 0
+    
+    # Dynamic collection name
+    coll_name = f"comments_{bvid}"
+    collection = mongo_db[coll_name]
+    
+    # Ensure index exists (idempotent)
+    collection.create_index("rpid", unique=True)
     
     saved_count = 0
     for c in comments_data:
@@ -88,7 +97,7 @@ def save_comments_to_mongodb(comments_data: list, bvid: str, oid: int):
                 "fetched_at": datetime.datetime.utcnow()
             }
             # Upsert: update if exists, insert if not
-            comments_collection.update_one(
+            collection.update_one(
                 {"rpid": c['rpid']},
                 {"$set": doc},
                 upsert=True
@@ -97,6 +106,24 @@ def save_comments_to_mongodb(comments_data: list, bvid: str, oid: int):
         except Exception as e:
             print(f"Error saving comment {c.get('rpid')}: {e}")
             continue
+            
+    # Update Metadata
+    try:
+        metadata_coll = mongo_db["video_metadata"]
+        metadata_coll.update_one(
+            {"bvid": bvid},
+            {"$set": {
+                "bvid": bvid,
+                "oid": oid,
+                "title": title,
+                "last_updated": datetime.datetime.utcnow(),
+                "comment_count": collection.count_documents({}),
+                "collection_name": coll_name
+            }},
+            upsert=True
+        )
+    except Exception as e:
+        print(f"Error saving metadata: {e}")
     
     return saved_count
 
@@ -255,7 +282,12 @@ async def fetch_task():
             print(f"Broadcasting {len(initial_comments)} history comments.")
             
             # Save to MongoDB
-            saved = save_comments_to_mongodb(all_replies, monitor_state.target_bvid, monitor_state.oid)
+            saved = save_comments_to_mongodb(
+                all_replies, 
+                monitor_state.target_bvid, 
+                monitor_state.oid,
+                monitor_state.title
+            )
             print(f"Saved {saved} comments to MongoDB.")
             
             await manager.broadcast({

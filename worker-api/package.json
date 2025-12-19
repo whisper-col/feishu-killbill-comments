@@ -1,0 +1,21 @@
+{
+  "name": "worker-api",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "hono": "^4.11.1",
+    "mongodb": "^7.0.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251219.0",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.56.0"
+  }
+}
