@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import random
 from typing import List, Optional
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.staticfiles import StaticFiles
@@ -83,6 +84,17 @@ def save_comments_to_mongodb(comments_data: list, bvid: str, oid: int, title: st
     saved_count = 0
     for c in comments_data:
         try:
+            # Extract location from reply_control
+            location = ""
+            if 'reply_control' in c and c['reply_control']:
+                location = c['reply_control'].get('location', '')
+            
+            # Extract fans medal info
+            fans_medal = ""
+            fans_detail = c['member'].get('fans_detail')
+            if fans_detail:
+                fans_medal = fans_detail.get('medal_name', '')
+            
             doc = {
                 "rpid": c['rpid'],
                 "oid": oid,
@@ -91,9 +103,14 @@ def save_comments_to_mongodb(comments_data: list, bvid: str, oid: int, title: st
                 "mid": c['member']['mid'],
                 "content": c['content']['message'],
                 "ctime": c['ctime'],
+                "sex": c['member'].get('sex', '保密'),
+                "location": location,  # IP属地
                 "level": c['member']['level_info']['current_level'],
                 "likes": c.get('like', 0),
                 "rcount": c.get('rcount', 0),
+                "fans_medal": fans_medal,  # 粉丝勋章
+                "parent": c.get('parent', 0),  # 父评论ID
+                "root": c.get('root', 0),  # 根评论ID
                 "fetched_at": datetime.datetime.utcnow()
             }
             # Upsert: update if exists, insert if not
@@ -195,8 +212,8 @@ async def fetch_task():
                 
                 page += 1
                 
-                # Small delay to avoid rate limiting
-                await asyncio.sleep(0.3)
+                # 增加延迟避免风控 (1-2秒随机)
+                await asyncio.sleep(1 + random.random())
                 
             except Exception as e:
                 print(f"Error fetching page {page}: {e}")
@@ -279,9 +296,9 @@ async def fetch_task():
                     print(f"Error parsing comment: {e}")
                     continue
             
-            print(f"Broadcasting {len(initial_comments)} history comments.")
+            print(f"Processed {len(initial_comments)} history comments.")
             
-            # Save to MongoDB
+            # Save ALL to MongoDB
             saved = save_comments_to_mongodb(
                 all_replies, 
                 monitor_state.target_bvid, 
@@ -290,14 +307,20 @@ async def fetch_task():
             )
             print(f"Saved {saved} comments to MongoDB.")
             
+            # Only send latest 20 to frontend
+            # Sort oldest first (reverse=False) so frontend prepend results in newest on top
+            latest_comments = sorted(initial_comments, key=lambda x: x['time'], reverse=True)[:20]
+            # Reverse again so oldest is sent first, prepend will put newest on top
+            latest_comments = list(reversed(latest_comments))
+            
             await manager.broadcast({
                 "type": "new_comments", 
-                "data": initial_comments
+                "data": latest_comments
             })
             
             await manager.broadcast({
                 "type": "status", 
-                "msg": f"已加载 {len(initial_comments)} 条历史评论，开始实时监控...",
+                "msg": f"已保存 {saved} 条评论到数据库，显示最新 {len(latest_comments)} 条",
                 "level": "success"
             })
         else:
@@ -366,7 +389,9 @@ async def fetch_task():
         except Exception as e:
             await manager.broadcast({"type": "status", "msg": f"API请求错误: {str(e)}", "level": "warning"})
             
-        await asyncio.sleep(5)
+        # 随机等待 15-25 秒，模拟人类行为
+        sleep_time = 20 + random.uniform(-5, 5)
+        await asyncio.sleep(sleep_time)
 
 # ==================== Endpoints ====================
 

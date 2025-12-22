@@ -1,4 +1,4 @@
-name = "feishu"
+name = "feishulink"
 main = "src/worker.ts"
 # 必须使用较新的日期来开启 Node.js 兼容性
 compatibility_date = "2025-12-19" 

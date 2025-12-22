@@ -145,41 +145,36 @@ app.post('/records', async (c) => {
         await client.connect();
         const collection = client.db(config.db).collection(config.coll);
 
-        // 分页逻辑
-        const pageSize = params.maxPageSize || 500; // 飞书一般请求 100-500 条
-        const skip = params.pageToken ? parseInt(params.pageToken) : 0;
-
-        // 拉取数据
+        // 一次性拉取所有数据（不分页），按评论时间升序（最旧在前）
         const docs = await collection.find({})
-            .sort({ fetched_at: -1 })
-            .skip(skip)
-            .limit(pageSize)
+            .sort({ ctime: 1 })  // 按评论时间升序
+            .limit(5000)
             .toArray();
 
         const records = docs.map(doc => ({
             primaryID: String(doc._id),
             data: {
                 id: String(doc._id),
-                bvid: doc.bvid || "",
                 user: doc.user || "",
+                mid: doc.mid ? String(doc.mid) : "",
+                sex: doc.sex || "保密",
+                location: doc.location || "",
                 content: doc.content || "",
-                time: doc.ctime ? new Date(doc.ctime * 1000).toLocaleString() : "", // ctime is unix timestamp
+                time: doc.ctime ? new Date(doc.ctime * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }) : "",
                 level: doc.level ? String(doc.level) : "0",
                 likes: doc.likes ? String(doc.likes) : "0",
-                rpid: String(doc.rpid || "")
+                rcount: doc.rcount ? String(doc.rcount) : "0",
+                fans_medal: doc.fans_medal || ""
             }
         }));
 
-        // 判断是否还有更多数据
-        const hasMore = records.length === pageSize;
-        const nextPageToken = hasMore ? String(skip + records.length) : "";
-
+        // 不分页，直接返回全部
         return c.json({
             code: 0,
             msg: "success",
             data: {
-                hasMore,
-                pageToken: nextPageToken,
+                hasMore: false,
+                pageToken: "",
                 records
             }
         });
@@ -190,21 +185,50 @@ app.post('/records', async (c) => {
     }
 })
 
-// 3. 表结构定义
+// 3. 表结构定义 - 需要从请求中获取配置来确定表名
 app.post('/table_meta', async (c) => {
+    const reqBody = await c.req.json();
+    const params = JSON.parse(reqBody.params);
+    const config = typeof params.datasourceConfig === 'string' ? JSON.parse(params.datasourceConfig) : params.datasourceConfig;
+
+    // 尝试从 video_metadata 获取视频标题
+    let tableName = "B站评论数据";
+    if (config.uri && config.db && config.coll && config.coll.startsWith('comments_')) {
+        const client = new MongoClient(config.uri, {
+            autoEncryption: undefined,
+            monitorCommands: false,
+            connectTimeoutMS: 5000,
+        } as any);
+        try {
+            await client.connect();
+            const bvid = config.coll.replace('comments_', '');
+            const metadata = await client.db(config.db).collection('video_metadata').findOne({ bvid });
+            if (metadata && metadata.title) {
+                tableName = metadata.title;
+            }
+        } catch (e) {
+            // Fallback to default name
+        } finally {
+            await client.close();
+        }
+    }
+
     return c.json({
         code: 0, msg: "success",
         data: {
-            tableName: "B站评论数据",
+            tableName,
             fields: [
                 { fieldID: "id", fieldName: "文档ID", fieldType: 1, isPrimary: true },
                 { fieldID: "user", fieldName: "用户名", fieldType: 1 },
+                { fieldID: "mid", fieldName: "用户UID", fieldType: 1 },
+                { fieldID: "sex", fieldName: "性别", fieldType: 1 },
+                { fieldID: "location", fieldName: "IP属地", fieldType: 1 },
                 { fieldID: "content", fieldName: "评论内容", fieldType: 1 },
                 { fieldID: "time", fieldName: "发布时间", fieldType: 1 },
-                { fieldID: "likes", fieldName: "点赞数", fieldType: 1 }, // 飞书文本类型比较安全
                 { fieldID: "level", fieldName: "等级", fieldType: 1 },
-                { fieldID: "bvid", fieldName: "视频BV号", fieldType: 1 },
-                { fieldID: "rpid", fieldName: "评论ID", fieldType: 1 }
+                { fieldID: "likes", fieldName: "点赞数", fieldType: 1 },
+                { fieldID: "rcount", fieldName: "回复数", fieldType: 1 },
+                { fieldID: "fans_medal", fieldName: "粉丝勋章", fieldType: 1 }
             ]
         }
     })
