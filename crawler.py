@@ -23,27 +23,54 @@ from pymongo import MongoClient
 
 # ==================== Configuration ====================
 def get_config():
-    """从环境变量读取配置"""
+    """从环境变量读取配置，Cookie 可从 MongoDB 获取"""
     bvid = os.environ.get("BVID", "")  # 可选，如果没有则从 MongoDB 读取
-    cookies_json = os.environ.get("COOKIES_JSON", "[]")
+    cookies_json = os.environ.get("COOKIES_JSON", "")
     mongo_uri = os.environ.get("MONGO_URI", "")
     
     if not mongo_uri:
         raise ValueError("MONGO_URI 环境变量未设置")
     
-    try:
-        cookies = json.loads(cookies_json)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"COOKIES_JSON 解析失败: {e}")
-    
-    if not cookies:
-        raise ValueError("COOKIES_JSON 为空，请配置至少一个账号")
+    cookies = []
+    if cookies_json:
+        try:
+            cookies = json.loads(cookies_json)
+            print(f"✓ 从环境变量加载了 {len(cookies)} 个账号")
+        except json.JSONDecodeError as e:
+            print(f"⚠ COOKIES_JSON 解析失败: {e}，将尝试从 MongoDB 读取")
     
     return {
         "bvid": bvid,  # 可能为空
-        "cookies": cookies,
+        "cookies": cookies,  # 可能为空，稍后从 MongoDB 补充
         "mongo_uri": mongo_uri
     }
+
+
+def get_cookie_pool(mongo_db, env_cookies: list) -> list:
+    """
+    获取 Cookie 池
+    优先使用环境变量中的 cookies，如果为空则从 MongoDB 的 cookie_pool 表获取
+    """
+    if env_cookies:
+        return env_cookies
+    
+    # 从 MongoDB 读取 Cookie 池
+    try:
+        cookie_coll = mongo_db["cookie_pool"]
+        cookies = list(cookie_coll.find({}))
+        result = []
+        for c in cookies:
+            if c.get("sessdata"):
+                result.append({
+                    "sessdata": c["sessdata"],
+                    "buvid3": c.get("buvid3", ""),
+                    "bili_jct": c.get("bili_jct", "")
+                })
+        print(f"✓ 从 MongoDB cookie_pool 读取到 {len(result)} 个账号")
+        return result
+    except Exception as e:
+        print(f"⚠ 读取 Cookie 池失败: {e}")
+        return []
 
 
 def get_monitor_list(mongo_db, env_bvid: str) -> list:
@@ -307,6 +334,12 @@ async def main():
         print(f"✗ MongoDB 连接失败: {e}")
         return
     
+    # 获取 Cookie 池（优先环境变量，其次 MongoDB）
+    cookies = get_cookie_pool(mongo_db, config["cookies"])
+    if not cookies:
+        print("⚠ 没有可用的账号，请在 WebUI 中导入 Cookie 或设置 COOKIES_JSON 环境变量")
+        return
+    
     # 获取监控列表
     bvid_list = get_monitor_list(mongo_db, config["bvid"])
     
@@ -317,7 +350,7 @@ async def main():
     print(f"\n📋 待抓取视频: {len(bvid_list)} 个")
     
     # 初始化凭证池
-    pool = CredentialPool(config["cookies"])
+    pool = CredentialPool(cookies)
     
     # 逐个抓取
     total_saved = 0

@@ -170,6 +170,72 @@ app.get('/api/video/:bvid', async (c) => {
 });
 
 
+// ==================== Cookie 池管理 API ====================
+
+// 获取 Cookie 池（脱敏）
+app.get('/api/cookies', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
+    try {
+        await client.connect();
+        const db = client.db('bilibili_monitor');
+        const cookies = await db.collection('cookie_pool').find({}).toArray();
+        return c.json({ code: 0, data: cookies.map((c: any, i: number) => ({ index: i, sessdata_mask: c.sessdata ? c.sessdata.substring(0, 10) + '...' : '', created_at: c.created_at })) });
+    } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
+    finally { await client.close(); }
+});
+
+// 导入 Cookie 列表（追加）
+app.post('/api/cookies', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    const body = await c.req.json();
+    const cookies = body.cookies;
+    if (!Array.isArray(cookies) || cookies.length === 0) return c.json({ code: 400, msg: '请提供 Cookie 数组' });
+    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
+    try {
+        await client.connect();
+        const coll = client.db('bilibili_monitor').collection('cookie_pool');
+        let addedCount = 0;
+        for (const cookie of cookies) {
+            if (cookie.sessdata) { await coll.insertOne({ sessdata: cookie.sessdata, buvid3: cookie.buvid3 || '', bili_jct: cookie.bili_jct || '', created_at: new Date() }); addedCount++; }
+        }
+        return c.json({ code: 0, msg: `成功导入 ${addedCount} 个账号` });
+    } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
+    finally { await client.close(); }
+});
+
+// 删除单个 Cookie
+app.delete('/api/cookies/:index', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    const index = parseInt(c.req.param('index'));
+    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
+    try {
+        await client.connect();
+        const cookies = await client.db('bilibili_monitor').collection('cookie_pool').find({}).toArray();
+        if (index < 0 || index >= cookies.length) return c.json({ code: 404, msg: '索引无效' });
+        await client.db('bilibili_monitor').collection('cookie_pool').deleteOne({ _id: cookies[index]._id });
+        return c.json({ code: 0, msg: '删除成功' });
+    } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
+    finally { await client.close(); }
+});
+
+// 清空 Cookie 池
+app.delete('/api/cookies', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
+    try {
+        await client.connect();
+        await client.db('bilibili_monitor').collection('cookie_pool').deleteMany({});
+        return c.json({ code: 0, msg: '已清空' });
+    } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
+    finally { await client.close(); }
+});
+
+
 // ==================== 监控列表管理 API ====================
 
 // 获取监控列表
@@ -179,9 +245,8 @@ app.get('/api/monitor', async (c) => {
     const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
         await client.connect();
-        const db = client.db('bilibili_monitor');
-        const configs = await db.collection('monitor_config').find({}).sort({ created_at: -1 }).toArray();
-        return c.json({ code: 0, data: configs.map(c => ({ bvid: c.bvid, title: c.title || '', enabled: c.enabled !== false, created_at: c.created_at })) });
+        const configs = await client.db('bilibili_monitor').collection('monitor_config').find({}).sort({ created_at: -1 }).toArray();
+        return c.json({ code: 0, data: configs.map((c: any) => ({ bvid: c.bvid, title: c.title || '', enabled: c.enabled !== false, created_at: c.created_at })) });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
     finally { await client.close(); }
 });
@@ -200,8 +265,7 @@ app.post('/api/monitor', async (c) => {
     try {
         await client.connect();
         const db = client.db('bilibili_monitor');
-        const existing = await db.collection('monitor_config').findOne({ bvid });
-        if (existing) return c.json({ code: 400, msg: '该视频已在监控列表中' });
+        if (await db.collection('monitor_config').findOne({ bvid })) return c.json({ code: 400, msg: '该视频已在监控列表中' });
         await db.collection('monitor_config').insertOne({ bvid, title: body.title || '', enabled: true, created_at: new Date() });
         return c.json({ code: 0, msg: '添加成功', data: { bvid } });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
@@ -216,8 +280,7 @@ app.delete('/api/monitor/:bvid', async (c) => {
     const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
         await client.connect();
-        const db = client.db('bilibili_monitor');
-        const result = await db.collection('monitor_config').deleteOne({ bvid });
+        const result = await client.db('bilibili_monitor').collection('monitor_config').deleteOne({ bvid });
         if (result.deletedCount === 0) return c.json({ code: 404, msg: '未找到该视频' });
         return c.json({ code: 0, msg: '删除成功' });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
@@ -797,13 +860,22 @@ function getIndexHTML(): string {
         </header>
 
         <div class="video-selector">
-            <h3>➕ 添加监控视频</h3>
+            <h3>📋 监控管理</h3>
             <div style="display:flex;gap:10px;margin-bottom:15px;">
-                <input type="text" id="bvid-input" placeholder="输入 BVID 或视频链接" style="flex:1;padding:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(0,0,0,0.3);color:#fff;">
-                <button class="refresh-btn" id="add-btn" onclick="addVideo()">添加</button>
+                <input type="text" id="bvid-input" placeholder="输入 BVID 或视频链接" style="flex:1;padding:12px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#fff;">
+                <button class="refresh-btn" onclick="addMonitor()">添加</button>
             </div>
-            <h3 style="margin-top:15px;">📋 监控列表</h3>
-            <div id="monitor-list" style="margin-top:10px;"></div>
+            <div id="monitor-list" style="max-height:150px;overflow-y:auto;"></div>
+        </div>
+
+        <div class="video-selector">
+            <h3>🔑 账号池 <span id="cookie-count">(0个)</span></h3>
+            <div style="display:flex;gap:10px;margin-bottom:10px;">
+                <input type="file" id="cookie-file" accept=".json" hidden>
+                <button class="refresh-btn" onclick="document.getElementById('cookie-file').click()">📁 导入 Cookie</button>
+                <button class="refresh-btn" style="background:#666;" onclick="clearCookies()">🗑️ 清空</button>
+            </div>
+            <div id="cookie-list" style="max-height:120px;overflow-y:auto;"></div>
         </div>
 
         <div class="video-selector">
@@ -837,64 +909,45 @@ function getIndexHTML(): string {
         let currentBvid = '';
         let currentOffset = 0;
         let videosData = [];
-        let monitorList = [];
 
         // 初始化
         async function init() {
-            await Promise.all([loadMonitorList(), loadVideos()]);
+            await Promise.all([loadMonitorList(), loadCookies(), loadVideos()]);
+            document.getElementById('cookie-file').addEventListener('change', handleCookieFile);
         }
 
-        // 加载监控列表
+        // ================= 监控列表管理 =================
         async function loadMonitorList() {
             try {
                 const res = await fetch('/api/monitor');
                 const json = await res.json();
-                if (json.code !== 0) throw new Error(json.msg);
-                monitorList = json.data;
-                renderMonitorList();
-            } catch (e) {
-                document.getElementById('monitor-list').innerHTML = '<div class="loading">加载失败</div>';
-            }
+                if (json.code !== 0) return;
+                const list = document.getElementById('monitor-list');
+                if (json.data.length === 0) {
+                    list.innerHTML = '<div style="color:#666;text-align:center;padding:10px;">暂无监控，请添加 BVID</div>';
+                    return;
+                }
+                list.innerHTML = json.data.map(m => '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(0,0,0,0.2);border-radius:6px;margin-bottom:6px;"><div><span style="color:#00d4ff;font-weight:600;">' + m.bvid + '</span><span style="color:#666;margin-left:10px;font-size:0.85rem;">' + (m.title || '等待抓取') + '</span></div><button style="background:rgba(255,82,82,0.2);color:#ff5252;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;" onclick="removeMonitor(\\'' + m.bvid + '\\')">删除</button></div>').join('');
+            } catch (e) { console.error(e); }
         }
 
-        // 渲染监控列表
-        function renderMonitorList() {
-            const list = document.getElementById('monitor-list');
-            if (monitorList.length === 0) {
-                list.innerHTML = '<div style="color:#666;padding:10px;">暂无监控视频</div>';
-                return;
-            }
-            list.innerHTML = monitorList.map(m => \`
-                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;margin-bottom:8px;border-left:3px solid #00d4ff;">
-                    <div>
-                        <div style="color:#00d4ff;font-weight:600;">\${m.bvid}</div>
-                        <div style="color:#666;font-size:0.85rem;">\${m.title || '等待抓取...'}</div>
-                    </div>
-                    <button onclick="removeVideo('\${m.bvid}')" style="background:rgba(255,82,82,0.2);color:#ff5252;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;">删除</button>
-                </div>
-            \`).join('');
-        }
-
-        // 添加监控视频
-        async function addVideo() {
+        async function addMonitor() {
             const input = document.getElementById('bvid-input');
-            const btn = document.getElementById('add-btn');
-            const bvid = input.value.trim();
+            let bvid = input.value.trim();
             if (!bvid) { alert('请输入 BVID'); return; }
-            btn.disabled = true; btn.textContent = '添加中...';
+            const match = bvid.match(/BV[a-zA-Z0-9]+/i);
+            if (match) bvid = match[0];
             try {
                 const res = await fetch('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bvid }) });
                 const json = await res.json();
                 if (json.code !== 0) { alert(json.msg); return; }
-                alert('添加成功！将在下次定时任务时抓取');
+                alert('添加成功！等待下次定时任务抓取');
                 input.value = '';
                 await loadMonitorList();
             } catch (e) { alert('添加失败'); }
-            finally { btn.disabled = false; btn.textContent = '添加'; }
         }
 
-        // 删除监控视频
-        async function removeVideo(bvid) {
+        async function removeMonitor(bvid) {
             if (!confirm('确定删除 ' + bvid + '？')) return;
             try {
                 const res = await fetch('/api/monitor/' + bvid, { method: 'DELETE' });
@@ -902,6 +955,64 @@ function getIndexHTML(): string {
                 if (json.code !== 0) { alert(json.msg); return; }
                 await loadMonitorList();
             } catch (e) { alert('删除失败'); }
+        }
+
+        // ================= Cookie 池管理 =================
+        async function loadCookies() {
+            try {
+                const res = await fetch('/api/cookies');
+                const json = await res.json();
+                if (json.code !== 0) return;
+                document.getElementById('cookie-count').textContent = '(' + json.data.length + '个)';
+                const list = document.getElementById('cookie-list');
+                if (json.data.length === 0) {
+                    list.innerHTML = '<div style="color:#666;text-align:center;padding:10px;">暂无账号，请导入 Cookie</div>';
+                    return;
+                }
+                list.innerHTML = json.data.map((c, i) => '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px;background:rgba(0,0,0,0.2);border-radius:4px;margin-bottom:4px;"><span style="color:#00d4ff;font-size:0.85rem;">#' + (i+1) + ' ' + c.sessdata_mask + '</span><button style="color:#ff5252;background:none;border:none;cursor:pointer;" onclick="removeCookie(' + i + ')">删除</button></div>').join('');
+            } catch (e) { console.error(e); }
+        }
+
+        async function handleCookieFile(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = async (event) => {
+                try {
+                    const data = JSON.parse(event.target.result);
+                    if (!Array.isArray(data)) throw new Error('格式错误');
+                    let cookies = [];
+                    if (data[0] && data[0].name !== undefined) {
+                        const sess = data.find(c => c.name && c.name.toUpperCase() === 'SESSDATA');
+                        if (sess) cookies.push({ sessdata: sess.value, buvid3: (data.find(c => c.name === 'buvid3') || {}).value || '', bili_jct: (data.find(c => c.name === 'bili_jct') || {}).value || '' });
+                    } else {
+                        data.forEach(item => { if (item.sessdata) cookies.push(item); });
+                    }
+                    if (cookies.length === 0) throw new Error('无有效 Cookie');
+                    const res = await fetch('/api/cookies', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ cookies }) });
+                    const json = await res.json();
+                    alert(json.msg || '导入成功');
+                    await loadCookies();
+                } catch (err) { alert('导入失败: ' + err.message); }
+            };
+            reader.readAsText(file);
+            e.target.value = '';
+        }
+
+        async function removeCookie(index) {
+            if (!confirm('确定删除？')) return;
+            try {
+                await fetch('/api/cookies/' + index, { method: 'DELETE' });
+                await loadCookies();
+            } catch (e) { alert('删除失败'); }
+        }
+
+        async function clearCookies() {
+            if (!confirm('确定清空所有账号？')) return;
+            try {
+                await fetch('/api/cookies', { method: 'DELETE' });
+                await loadCookies();
+            } catch (e) { alert('清空失败'); }
         }
 
         // 加载视频列表
