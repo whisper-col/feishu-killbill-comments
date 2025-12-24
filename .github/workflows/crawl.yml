@@ -1,15 +1,26 @@
 name: 定时抓取 Bilibili 评论
 
 on:
+  push:
+    branches: [master]
+    paths:
+      - 'crawler.py'
+      - '.github/workflows/crawl.yml'
   schedule:
     # 每 20 分钟运行一次
     - cron: '*/20 * * * *'
   workflow_dispatch:
     # 支持手动触发
     inputs:
-      bvid:
-        description: '要抓取的视频 BVID（留空则使用 Secrets 中的配置）'
+      fetch_replies:
+        description: '是否抓取回复评论'
         required: false
+        default: 'true'
+        type: string
+      action:
+        description: '操作类型 (run/pause/resume)'
+        required: false
+        default: 'run'
         type: string
 
 jobs:
@@ -31,7 +42,6 @@ jobs:
       - name: 运行爬虫
         run: uv run python crawler.py
         env:
-          # 优先使用手动输入的 BVID，否则用 Secrets
-          BVID: ${{ github.event.inputs.bvid || secrets.BVID }}
-          COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
+          FETCH_REPLIES: ${{ github.event.inputs.fetch_replies || 'true' }}
+          ACTION: ${{ github.event.inputs.action || 'run' }}
           MONGO_URI: ${{ secrets.MONGO_URI }}

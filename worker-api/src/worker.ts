@@ -327,13 +327,15 @@ app.post('/api/run', async (c) => {
         return c.json({ code: 500, msg: 'GITHUB_TOKEN 未配置' });
     }
 
-    // 获取请求体中的 bvid
-    let bvid = '';
+    // 获取请求体参数
+    let fetchReplies = 'true';
+    let action = 'run';
     try {
         const body = await c.req.json();
-        bvid = body.bvid || '';
+        fetchReplies = body.fetch_replies !== false ? 'true' : 'false';
+        action = body.action || 'run';
     } catch {
-        // 没有 body 也可以
+        // 没有 body 使用默认值
     }
 
     try {
@@ -350,14 +352,20 @@ app.post('/api/run', async (c) => {
                 body: JSON.stringify({
                     ref: 'master',
                     inputs: {
-                        bvid: bvid
+                        fetch_replies: fetchReplies,
+                        action: action
                     }
                 })
             }
         );
 
         if (response.status === 204) {
-            return c.json({ code: 0, msg: bvid ? `已触发抓取 ${bvid}` : '已触发抓取任务' });
+            const msgs: Record<string, string> = {
+                'run': '已触发抓取任务',
+                'pause': '已暂停定时抓取',
+                'resume': '已恢复定时抓取'
+            };
+            return c.json({ code: 0, msg: msgs[action] || '操作成功' });
         } else {
             const error = await response.text();
             return c.json({ code: response.status, msg: `触发失败: ${error}` });
@@ -974,8 +982,11 @@ function getIndexHTML(): string {
         <header>
             <h1>📡 B站评论监控</h1>
             <div class="status-bar" style="flex-wrap:wrap;gap:10px;">
-                <input type="text" id="run-bvid" placeholder="输入 BVID 抓取" style="padding:8px 12px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);border-radius:6px;color:#fff;width:180px;">
+                <label style="display:flex;align-items:center;gap:5px;color:#888;font-size:0.9rem;">
+                    <input type="checkbox" id="fetch-replies" checked> 抓取回复
+                </label>
                 <button class="refresh-btn" id="run-btn" onclick="runCrawler()" style="padding:8px 20px;">🚀 运行抓取</button>
+                <button class="refresh-btn" id="pause-btn" onclick="togglePause()" style="padding:8px 16px;background:#666;">⏸️ 暂停</button>
                 <div class="status-badge" id="run-status">
                     <span id="run-status-text">就绪</span>
                 </div>
@@ -1040,11 +1051,12 @@ function getIndexHTML(): string {
         }
 
         // ================= 手动运行 =================
+        let isPaused = false;
+        
         async function runCrawler() {
             const btn = document.getElementById('run-btn');
             const status = document.getElementById('run-status-text');
-            const bvidInput = document.getElementById('run-bvid');
-            const bvid = bvidInput ? bvidInput.value.trim() : '';
+            const fetchReplies = document.getElementById('fetch-replies')?.checked ?? true;
             
             btn.disabled = true;
             btn.textContent = '运行中...';
@@ -1053,14 +1065,12 @@ function getIndexHTML(): string {
                 const res = await fetch('/api/run', { 
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ bvid })
+                    body: JSON.stringify({ fetch_replies: fetchReplies, action: 'run' })
                 });
                 const json = await res.json();
                 if (json.code === 0) {
                     status.textContent = '已触发，等待执行';
                     alert(json.msg);
-                    if (bvidInput) bvidInput.value = '';
-                    // 30 秒后刷新状态
                     setTimeout(loadRunStatus, 30000);
                 } else {
                     status.textContent = '触发失败';
@@ -1072,6 +1082,35 @@ function getIndexHTML(): string {
             } finally {
                 btn.disabled = false;
                 btn.textContent = '🚀 运行抓取';
+            }
+        }
+
+        async function togglePause() {
+            const btn = document.getElementById('pause-btn');
+            const status = document.getElementById('run-status-text');
+            const action = isPaused ? 'resume' : 'pause';
+            
+            btn.disabled = true;
+            try {
+                const res = await fetch('/api/run', { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action })
+                });
+                const json = await res.json();
+                if (json.code === 0) {
+                    isPaused = !isPaused;
+                    btn.textContent = isPaused ? '▶️ 继续' : '⏸️ 暂停';
+                    btn.style.background = isPaused ? '#4CAF50' : '#666';
+                    status.textContent = isPaused ? '已暂停' : '运行中';
+                    alert(json.msg);
+                } else {
+                    alert(json.msg);
+                }
+            } catch (e) {
+                alert('操作失败: ' + e.message);
+            } finally {
+                btn.disabled = false;
             }
         }
 

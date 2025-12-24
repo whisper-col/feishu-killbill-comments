@@ -27,6 +27,8 @@ def get_config():
     bvid = os.environ.get("BVID", "")  # 可选，如果没有则从 MongoDB 读取
     cookies_json = os.environ.get("COOKIES_JSON", "")
     mongo_uri = os.environ.get("MONGO_URI", "")
+    fetch_replies = os.environ.get("FETCH_REPLIES", "true").lower() == "true"
+    action = os.environ.get("ACTION", "run")  # run/pause/resume
     
     if not mongo_uri:
         raise ValueError("MONGO_URI 环境变量未设置")
@@ -42,7 +44,9 @@ def get_config():
     return {
         "bvid": bvid,  # 可能为空
         "cookies": cookies,  # 可能为空，稍后从 MongoDB 补充
-        "mongo_uri": mongo_uri
+        "mongo_uri": mongo_uri,
+        "fetch_replies": fetch_replies,
+        "action": action
     }
 
 
@@ -205,8 +209,15 @@ def save_comments_to_mongodb(mongo_db, comments_data: list, bvid: str, oid: int,
 
 
 # ==================== Main Crawler ====================
-async def crawl_comments(bvid: str, pool: CredentialPool, mongo_db):
-    """主爬虫逻辑"""
+async def crawl_comments(bvid: str, pool: CredentialPool, mongo_db, fetch_replies: bool = True):
+    """主爬虫逻辑
+    
+    Args:
+        bvid: 视频 BVID
+        pool: 凭证池
+        mongo_db: MongoDB 数据库
+        fetch_replies: 是否抓取回复评论
+    """
     print(f"\n📺 开始抓取视频: {bvid}")
     
     # 1. 获取视频信息
@@ -259,47 +270,50 @@ async def crawl_comments(bvid: str, pool: CredentialPool, mongo_db):
             print(f"  ⚠ 第 {page} 页抓取失败: {e}")
             break
     
-    # 3. 抓取子评论
-    print("\n📥 正在抓取子评论...")
+    # 3. 抓取子评论（如果启用）
     sub_replies_count = 0
-    
-    for idx, top_comment in enumerate(all_replies[:]):
-        rcount = top_comment.get('rcount', 0)
-        if rcount > 0:
-            sub_page = 1
-            while True:
-                try:
-                    async def fetch_sub(credential, oid, rpid, page_idx):
-                        c = comment.Comment(
-                            oid=oid,
-                            type_=comment.CommentResourceType.VIDEO,
-                            rpid=rpid,
-                            credential=credential
-                        )
-                        return await c.get_sub_comments(page_index=page_idx, page_size=20)
+    if fetch_replies:
+        print("\n📥 正在抓取子评论...")
+        
+        for idx, top_comment in enumerate(all_replies[:]):
+            rcount = top_comment.get('rcount', 0)
+            if rcount > 0:
+                sub_page = 1
+                while True:
+                    try:
+                        async def fetch_sub(credential, oid, rpid, page_idx):
+                            c = comment.Comment(
+                                oid=oid,
+                                type_=comment.CommentResourceType.VIDEO,
+                                rpid=rpid,
+                                credential=credential
+                            )
+                            return await c.get_sub_comments(page_index=page_idx, page_size=20)
 
-                    sub_data = await pool.execute_with_retry(
-                        fetch_sub,
-                        oid=oid,
-                        rpid=top_comment['rpid'],
-                        page_idx=sub_page
-                    )
-                    
-                    sub_list = sub_data.get('replies') or []
-                    if not sub_list:
+                        sub_data = await pool.execute_with_retry(
+                            fetch_sub,
+                            oid=oid,
+                            rpid=top_comment['rpid'],
+                            page_idx=sub_page
+                        )
+                        
+                        sub_list = sub_data.get('replies') or []
+                        if not sub_list:
+                            break
+                        
+                        all_replies.extend(sub_list)
+                        sub_replies_count += len(sub_list)
+                        
+                        if len(sub_list) < 20:
+                            break
+                        sub_page += 1
+                        await asyncio.sleep(0.1)
+                    except Exception as e:
                         break
-                    
-                    all_replies.extend(sub_list)
-                    sub_replies_count += len(sub_list)
-                    
-                    if len(sub_list) < 20:
-                        break
-                    sub_page += 1
-                    await asyncio.sleep(0.1)
-                except Exception as e:
-                    break
-    
-    print(f"  子评论: {sub_replies_count} 条")
+        
+        print(f"  子评论: {sub_replies_count} 条")
+    else:
+        print("\n⏭️ 跳过子评论抓取")
     
     # 4. 保存到 MongoDB
     print(f"\n💾 保存到 MongoDB...")
@@ -321,6 +335,18 @@ async def main():
     except ValueError as e:
         print(f"✗ 配置错误: {e}")
         return
+    
+    # 检查 action
+    action = config.get("action", "run")
+    if action == "pause":
+        print("⏸️ 定时抓取已暂停")
+        return
+    elif action == "resume":
+        print("▶️ 定时抓取已恢复")
+        # resume 也继续执行抓取
+    
+    fetch_replies = config.get("fetch_replies", True)
+    print(f"📋 抓取回复: {'是' if fetch_replies else '否'}")
     
     # 连接 MongoDB
     print("\n📦 连接 MongoDB...")
@@ -358,7 +384,7 @@ async def main():
         print(f"\n{'─' * 40}")
         print(f"[{i}/{len(bvid_list)}] 处理视频: {bvid}")
         try:
-            saved = await crawl_comments(bvid, pool, mongo_db)
+            saved = await crawl_comments(bvid, pool, mongo_db, fetch_replies=fetch_replies)
             total_saved += saved or 0
         except Exception as e:
             print(f"✗ 抓取失败: {e}")
