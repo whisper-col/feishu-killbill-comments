@@ -1,11 +1,30 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
+import { basicAuth } from 'hono/basic-auth'
 import { MongoClient } from 'mongodb'
 
 const app = new Hono()
 
 // 启用 CORS
 app.use('*', cors())
+
+// Basic Auth 认证（保护所有路由）
+app.use('*', async (c, next) => {
+    const authUser = c.env?.AUTH_USER as string;
+    const authPassword = c.env?.AUTH_PASSWORD as string;
+
+    // 如果没有配置认证信息，跳过认证（方便开发测试）
+    if (!authUser || !authPassword) {
+        return next();
+    }
+
+    // 使用 Basic Auth
+    const auth = basicAuth({
+        username: authUser,
+        password: authPassword,
+    });
+    return auth(c, next);
+})
 
 // ==================== 评论监控 WebUI API ====================
 
@@ -285,6 +304,91 @@ app.delete('/api/monitor/:bvid', async (c) => {
         return c.json({ code: 0, msg: '删除成功' });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
     finally { await client.close(); }
+});
+
+
+// ==================== 手动运行 API ====================
+
+// 触发 GitHub Actions 运行爬虫
+app.post('/api/run', async (c) => {
+    const githubToken = c.env?.GITHUB_TOKEN as string;
+    const githubRepo = c.env?.GITHUB_REPO as string || 'whisper-col/bilibili-comment-monitor';
+
+    if (!githubToken) {
+        return c.json({ code: 500, msg: 'GITHUB_TOKEN 未配置' });
+    }
+
+    try {
+        // 调用 GitHub API 触发 workflow_dispatch
+        const response = await fetch(
+            `https://api.github.com/repos/${githubRepo}/actions/workflows/crawl.yml/dispatches`,
+            {
+                method: 'POST',
+                headers: {
+                    'Accept': 'application/vnd.github.v3+json',
+                    'Authorization': `token ${githubToken}`,
+                    'User-Agent': 'Bilibili-Monitor-Worker'
+                },
+                body: JSON.stringify({
+                    ref: 'master'
+                })
+            }
+        );
+
+        if (response.status === 204) {
+            return c.json({ code: 0, msg: '已触发抓取任务，请稍后查看结果' });
+        } else {
+            const error = await response.text();
+            return c.json({ code: response.status, msg: `触发失败: ${error}` });
+        }
+    } catch (e: any) {
+        return c.json({ code: 500, msg: e.message });
+    }
+});
+
+// 获取运行状态
+app.get('/api/run/status', async (c) => {
+    const githubToken = c.env?.GITHUB_TOKEN as string;
+    const githubRepo = c.env?.GITHUB_REPO as string || 'whisper-col/bilibili-comment-monitor';
+
+    if (!githubToken) {
+        return c.json({ code: 0, data: { configured: false } });
+    }
+
+    try {
+        // 获取最近的 workflow runs
+        const response = await fetch(
+            `https://api.github.com/repos/${githubRepo}/actions/workflows/crawl.yml/runs?per_page=1`,
+            {
+                headers: {
+                    'Accept': 'application/vnd.github.v3+json',
+                    'Authorization': `token ${githubToken}`,
+                    'User-Agent': 'Bilibili-Monitor-Worker'
+                }
+            }
+        );
+
+        if (response.ok) {
+            const data: any = await response.json();
+            const run = data.workflow_runs?.[0];
+            return c.json({
+                code: 0,
+                data: {
+                    configured: true,
+                    lastRun: run ? {
+                        status: run.status,
+                        conclusion: run.conclusion,
+                        created_at: run.created_at,
+                        html_url: run.html_url
+                    } : null
+                }
+            });
+        } else {
+            return c.json({ code: 0, data: { configured: true, error: '获取状态失败' } });
+        }
+    } catch (e: any) {
+        return c.json({ code: 500, msg: e.message });
+    }
 });
 
 
@@ -849,12 +953,9 @@ function getIndexHTML(): string {
         <header>
             <h1>📡 B站评论监控</h1>
             <div class="status-bar">
-                <div class="status-badge success">
-                    <span class="pulse"></span>
-                    <span>定时抓取中</span>
-                </div>
-                <div class="status-badge" id="last-update">
-                    上次更新: --
+                <button class="refresh-btn" id="run-btn" onclick="runCrawler()" style="padding:8px 20px;">🚀 运行抓取</button>
+                <div class="status-badge" id="run-status">
+                    <span id="run-status-text">就绪</span>
                 </div>
             </div>
         </header>
@@ -912,8 +1013,59 @@ function getIndexHTML(): string {
 
         // 初始化
         async function init() {
-            await Promise.all([loadMonitorList(), loadCookies(), loadVideos()]);
+            await Promise.all([loadMonitorList(), loadCookies(), loadVideos(), loadRunStatus()]);
             document.getElementById('cookie-file').addEventListener('change', handleCookieFile);
+        }
+
+        // ================= 手动运行 =================
+        async function runCrawler() {
+            const btn = document.getElementById('run-btn');
+            const status = document.getElementById('run-status-text');
+            btn.disabled = true;
+            btn.textContent = '运行中...';
+            status.textContent = '正在触发...';
+            try {
+                const res = await fetch('/api/run', { method: 'POST' });
+                const json = await res.json();
+                if (json.code === 0) {
+                    status.textContent = '已触发，等待执行';
+                    alert(json.msg);
+                    // 30 秒后刷新状态
+                    setTimeout(loadRunStatus, 30000);
+                } else {
+                    status.textContent = '触发失败';
+                    alert(json.msg);
+                }
+            } catch (e) {
+                status.textContent = '请求失败';
+                alert('运行失败: ' + e.message);
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🚀 运行抓取';
+            }
+        }
+
+        async function loadRunStatus() {
+            try {
+                const res = await fetch('/api/run/status');
+                const json = await res.json();
+                const status = document.getElementById('run-status-text');
+                if (!json.data?.configured) {
+                    status.textContent = '未配置 Token';
+                    return;
+                }
+                if (json.data.lastRun) {
+                    const run = json.data.lastRun;
+                    const time = new Date(run.created_at).toLocaleString('zh-CN');
+                    if (run.status === 'completed') {
+                        status.textContent = run.conclusion === 'success' ? '✓ ' + time : '✗ 失败';
+                    } else {
+                        status.textContent = '⏳ 运行中';
+                    }
+                } else {
+                    status.textContent = '就绪';
+                }
+            } catch (e) { console.error(e); }
         }
 
         // ================= 监控列表管理 =================
