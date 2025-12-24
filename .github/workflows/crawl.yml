@@ -1,0 +1,31 @@
+name: 定时抓取 Bilibili 评论
+
+on:
+  schedule:
+    # 每 20 分钟运行一次
+    - cron: '*/20 * * * *'
+  workflow_dispatch:
+    # 支持手动触发
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout 代码
+        uses: actions/checkout@v4
+
+      - name: 安装 uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          version: "latest"
+      
+      - name: 安装依赖
+        run: uv sync
+
+      - name: 运行爬虫
+        run: uv run python crawler.py
+        env:
+          BVID: ${{ secrets.BVID }}
+          COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
+          MONGO_URI: ${{ secrets.MONGO_URI }}

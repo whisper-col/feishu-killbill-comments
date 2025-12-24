@@ -1,9 +1,178 @@
 import { Hono } from 'hono'
+import { cors } from 'hono/cors'
 import { MongoClient } from 'mongodb'
 
 const app = new Hono()
 
-// 1. 获取视频列表
+// 启用 CORS
+app.use('*', cors())
+
+// ==================== 评论监控 WebUI API ====================
+
+// 获取视频列表
+app.get('/api/videos', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) {
+        return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    }
+
+    const client = new MongoClient(mongoUri, {
+        autoEncryption: undefined,
+        monitorCommands: false,
+        connectTimeoutMS: 5000,
+    } as any);
+
+    try {
+        await client.connect();
+        const db = client.db('bilibili_monitor');
+        const videos = await db.collection('video_metadata')
+            .find({})
+            .sort({ last_updated: -1 })
+            .limit(50)
+            .toArray();
+
+        return c.json({
+            code: 0,
+            data: videos.map(v => ({
+                bvid: v.bvid,
+                title: v.title,
+                oid: v.oid,
+                comment_count: v.comment_count,
+                last_updated: v.last_updated
+            }))
+        });
+    } catch (e: any) {
+        return c.json({ code: 500, msg: e.message });
+    } finally {
+        await client.close();
+    }
+});
+
+// 获取指定视频的评论
+app.get('/api/comments/:bvid', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) {
+        return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    }
+
+    const bvid = c.req.param('bvid');
+    const limit = parseInt(c.req.query('limit') || '50');
+    const offset = parseInt(c.req.query('offset') || '0');
+
+    const client = new MongoClient(mongoUri, {
+        autoEncryption: undefined,
+        monitorCommands: false,
+        connectTimeoutMS: 10000,
+    } as any);
+
+    try {
+        await client.connect();
+        const db = client.db('bilibili_monitor');
+        const collName = `comments_${bvid}`;
+
+        // 获取评论总数
+        const total = await db.collection(collName).countDocuments();
+
+        // 获取评论列表（按时间倒序）
+        const comments = await db.collection(collName)
+            .find({})
+            .sort({ ctime: -1 })
+            .skip(offset)
+            .limit(Math.min(limit, 100))
+            .toArray();
+
+        return c.json({
+            code: 0,
+            data: {
+                total,
+                comments: comments.map(c => ({
+                    rpid: c.rpid,
+                    user: c.user,
+                    mid: c.mid,
+                    content: c.content,
+                    ctime: c.ctime,
+                    time: new Date(c.ctime * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+                    level: c.level,
+                    likes: c.likes,
+                    rcount: c.rcount,
+                    sex: c.sex,
+                    location: c.location,
+                    fans_medal: c.fans_medal,
+                    parent: c.parent,
+                    root: c.root
+                }))
+            }
+        });
+    } catch (e: any) {
+        return c.json({ code: 500, msg: e.message });
+    } finally {
+        await client.close();
+    }
+});
+
+// 获取视频详情（包括最新评论）
+app.get('/api/video/:bvid', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) {
+        return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    }
+
+    const bvid = c.req.param('bvid');
+
+    const client = new MongoClient(mongoUri, {
+        autoEncryption: undefined,
+        monitorCommands: false,
+        connectTimeoutMS: 10000,
+    } as any);
+
+    try {
+        await client.connect();
+        const db = client.db('bilibili_monitor');
+
+        // 获取视频元数据
+        const metadata = await db.collection('video_metadata').findOne({ bvid });
+
+        // 获取最新20条评论
+        const collName = `comments_${bvid}`;
+        const recentComments = await db.collection(collName)
+            .find({})
+            .sort({ ctime: -1 })
+            .limit(20)
+            .toArray();
+
+        return c.json({
+            code: 0,
+            data: {
+                video: metadata ? {
+                    bvid: metadata.bvid,
+                    title: metadata.title,
+                    oid: metadata.oid,
+                    comment_count: metadata.comment_count,
+                    last_updated: metadata.last_updated
+                } : null,
+                recent_comments: recentComments.map(c => ({
+                    rpid: c.rpid,
+                    user: c.user,
+                    mid: c.mid,
+                    content: c.content,
+                    ctime: c.ctime,
+                    time: new Date(c.ctime * 1000).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' }),
+                    level: c.level,
+                    likes: c.likes
+                }))
+            }
+        });
+    } catch (e: any) {
+        return c.json({ code: 500, msg: e.message });
+    } finally {
+        await client.close();
+    }
+});
+
+
+// ==================== 飞书数据连接器 API (保留原有功能) ====================
+
+// 获取视频列表 (飞书用)
 app.post('/get_videos', async (c) => {
     const { uri, db } = await c.req.json();
     const client = new MongoClient(uri, {
@@ -23,7 +192,7 @@ app.post('/get_videos', async (c) => {
     }
 });
 
-// 2. 配置界面
+// 飞书配置界面
 app.get('/config', (c) => {
     return c.html(`
     <!DOCTYPE html>
@@ -65,7 +234,6 @@ app.get('/config', (c) => {
             const db = document.getElementById('db').value.trim();
             if(!uri) return alert("请先填写 URI");
             
-            // Save to localStorage
             localStorage.setItem('mongo_uri', uri);
             
             const btn = document.getElementById('loadVideosBtn');
@@ -82,13 +250,11 @@ app.get('/config', (c) => {
                 const select = document.getElementById('videoSelect');
                 select.innerHTML = '<option value="">-- 请选择视频 --</option>';
                 
-                // Add "All Comments" option
                 const allOpt = document.createElement('option');
                 allOpt.value = 'comments';
                 allOpt.textContent = '📂 所有评论 (旧数据)';
                 select.appendChild(allOpt);
                 
-                // Add videos
                 json.data.forEach(v => {
                     const opt = document.createElement('option');
                     opt.value = v.collection_name || 'comments_' + v.bvid;
@@ -103,7 +269,6 @@ app.get('/config', (c) => {
             }
         }
         
-        // Auto-load URI from localStorage
         const savedUri = localStorage.getItem('mongo_uri');
         if (savedUri) document.getElementById('uri').value = savedUri;
         
@@ -130,7 +295,7 @@ app.get('/config', (c) => {
   `)
 })
 
-// 2. 数据处理：使用 MongoClient 直连
+// 飞书数据获取
 app.post('/records', async (c) => {
     const reqBody = await c.req.json();
     const params = JSON.parse(reqBody.params);
@@ -145,9 +310,8 @@ app.post('/records', async (c) => {
         await client.connect();
         const collection = client.db(config.db).collection(config.coll);
 
-        // 一次性拉取所有数据（不分页），按评论时间升序（最旧在前）
         const docs = await collection.find({})
-            .sort({ ctime: 1 })  // 按评论时间升序
+            .sort({ ctime: 1 })
             .limit(5000)
             .toArray();
 
@@ -168,7 +332,6 @@ app.post('/records', async (c) => {
             }
         }));
 
-        // 不分页，直接返回全部
         return c.json({
             code: 0,
             msg: "success",
@@ -185,13 +348,12 @@ app.post('/records', async (c) => {
     }
 })
 
-// 3. 表结构定义 - 需要从请求中获取配置来确定表名
+// 飞书表结构定义
 app.post('/table_meta', async (c) => {
     const reqBody = await c.req.json();
     const params = JSON.parse(reqBody.params);
     const config = typeof params.datasourceConfig === 'string' ? JSON.parse(params.datasourceConfig) : params.datasourceConfig;
 
-    // 尝试从 video_metadata 获取视频标题
     let tableName = "B站评论数据";
     if (config.uri && config.db && config.coll && config.coll.startsWith('comments_')) {
         const client = new MongoClient(config.uri, {
@@ -234,7 +396,7 @@ app.post('/table_meta', async (c) => {
     })
 })
 
-// 4. 元数据
+// 飞书元数据
 app.get('/meta.json', (c) => {
     const origin = new URL(c.req.url).origin;
     return c.json({
@@ -250,5 +412,544 @@ app.get('/meta.json', (c) => {
         }
     })
 })
+
+
+// ==================== 静态页面 ====================
+
+// 主页 - 评论监控 WebUI
+app.get('/', (c) => {
+    return c.html(getIndexHTML());
+});
+
+// 提供静态资源的内联 HTML
+function getIndexHTML(): string {
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>B站评论监控</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            min-height: 100vh;
+            color: #e0e0e0;
+        }
+        
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        
+        header {
+            text-align: center;
+            padding: 30px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            margin-bottom: 30px;
+        }
+        
+        header h1 {
+            font-size: 2rem;
+            background: linear-gradient(90deg, #00d4ff, #7b2ff7);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        
+        .status-bar {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 15px;
+            margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            background: rgba(255,255,255,0.1);
+        }
+        
+        .status-badge.success {
+            background: rgba(0, 200, 83, 0.2);
+            color: #00c853;
+        }
+        
+        .pulse {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #00c853;
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+        
+        .video-selector {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 20px;
+        }
+        
+        .video-selector h3 {
+            margin-bottom: 15px;
+            font-size: 1rem;
+            color: #888;
+        }
+        
+        select {
+            width: 100%;
+            padding: 12px 15px;
+            border: 1px solid rgba(255,255,255,0.2);
+            border-radius: 8px;
+            background: rgba(0,0,0,0.3);
+            color: #fff;
+            font-size: 1rem;
+            cursor: pointer;
+        }
+        
+        select:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        
+        .video-info {
+            margin-top: 15px;
+            padding: 15px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 8px;
+            display: none;
+        }
+        
+        .video-info.show {
+            display: block;
+        }
+        
+        .video-info h4 {
+            color: #00d4ff;
+            margin-bottom: 10px;
+        }
+        
+        .video-info p {
+            color: #888;
+            font-size: 0.9rem;
+            margin: 5px 0;
+        }
+        
+        .comments-section {
+            background: rgba(255,255,255,0.05);
+            border-radius: 12px;
+            padding: 20px;
+        }
+        
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .section-header h2 {
+            font-size: 1.2rem;
+        }
+        
+        .refresh-btn {
+            background: linear-gradient(90deg, #00d4ff, #7b2ff7);
+            border: none;
+            color: white;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.9rem;
+            transition: opacity 0.2s;
+        }
+        
+        .refresh-btn:hover {
+            opacity: 0.8;
+        }
+        
+        .refresh-btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        
+        .comments-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            max-height: 600px;
+            overflow-y: auto;
+        }
+        
+        .comment-item {
+            background: rgba(0,0,0,0.3);
+            border-radius: 10px;
+            padding: 15px;
+            border-left: 3px solid #00d4ff;
+            transition: transform 0.2s;
+        }
+        
+        .comment-item:hover {
+            transform: translateX(5px);
+        }
+        
+        .comment-item.sub-comment {
+            margin-left: 20px;
+            border-left-color: #7b2ff7;
+            opacity: 0.85;
+        }
+        
+        .comment-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        
+        .comment-user {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .user-name {
+            font-weight: 600;
+            color: #fff;
+        }
+        
+        .user-level {
+            font-size: 0.75rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: linear-gradient(90deg, #ff6b6b, #ffa502);
+            color: white;
+        }
+        
+        .user-medal {
+            font-size: 0.75rem;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: rgba(123, 47, 247, 0.3);
+            color: #b388ff;
+        }
+        
+        .comment-time {
+            color: #666;
+            font-size: 0.85rem;
+        }
+        
+        .comment-content {
+            color: #e0e0e0;
+            line-height: 1.6;
+            word-break: break-word;
+        }
+        
+        .comment-footer {
+            display: flex;
+            gap: 15px;
+            margin-top: 10px;
+            font-size: 0.85rem;
+            color: #666;
+        }
+        
+        .comment-footer span {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        
+        .empty-state {
+            text-align: center;
+            padding: 60px 20px;
+            color: #666;
+        }
+        
+        .empty-state svg {
+            width: 80px;
+            height: 80px;
+            margin-bottom: 20px;
+            opacity: 0.3;
+        }
+        
+        .load-more {
+            display: block;
+            width: 100%;
+            padding: 12px;
+            margin-top: 15px;
+            background: rgba(255,255,255,0.1);
+            border: none;
+            border-radius: 8px;
+            color: #888;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+        
+        .load-more:hover {
+            background: rgba(255,255,255,0.15);
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 10px;
+            }
+            header h1 {
+                font-size: 1.5rem;
+            }
+            .comment-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 5px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>📡 B站评论监控</h1>
+            <div class="status-bar">
+                <div class="status-badge success">
+                    <span class="pulse"></span>
+                    <span>定时抓取中</span>
+                </div>
+                <div class="status-badge" id="last-update">
+                    上次更新: --
+                </div>
+            </div>
+        </header>
+
+        <div class="video-selector">
+            <h3>选择视频</h3>
+            <select id="video-select">
+                <option value="">加载中...</option>
+            </select>
+            <div class="video-info" id="video-info">
+                <h4 id="video-title">--</h4>
+                <p>BVID: <span id="video-bvid">--</span></p>
+                <p>评论数: <span id="video-count">--</span></p>
+                <p>最后更新: <span id="video-updated">--</span></p>
+            </div>
+        </div>
+
+        <div class="comments-section">
+            <div class="section-header">
+                <h2>💬 最新评论</h2>
+                <button class="refresh-btn" id="refresh-btn" onclick="loadComments()">🔄 刷新</button>
+            </div>
+            <div class="comments-list" id="comments-list">
+                <div class="loading">请先选择一个视频...</div>
+            </div>
+            <button class="load-more" id="load-more" style="display:none;" onclick="loadMoreComments()">
+                加载更多...
+            </button>
+        </div>
+    </div>
+
+    <script>
+        let currentBvid = '';
+        let currentOffset = 0;
+        let videosData = [];
+
+        // 初始化
+        async function init() {
+            await loadVideos();
+        }
+
+        // 加载视频列表
+        async function loadVideos() {
+            try {
+                const res = await fetch('/api/videos');
+                const json = await res.json();
+                
+                if (json.code !== 0) throw new Error(json.msg);
+                
+                videosData = json.data;
+                const select = document.getElementById('video-select');
+                
+                if (videosData.length === 0) {
+                    select.innerHTML = '<option value="">暂无视频数据，等待爬虫抓取...</option>';
+                    return;
+                }
+                
+                select.innerHTML = '<option value="">-- 请选择视频 --</option>';
+                videosData.forEach(v => {
+                    const opt = document.createElement('option');
+                    opt.value = v.bvid;
+                    opt.textContent = \`\${v.title} (\${v.comment_count || 0}条)\`;
+                    select.appendChild(opt);
+                });
+                
+                // 默认选中第一个
+                if (videosData.length > 0) {
+                    select.value = videosData[0].bvid;
+                    selectVideo(videosData[0].bvid);
+                }
+            } catch (e) {
+                console.error('加载视频列表失败:', e);
+                document.getElementById('video-select').innerHTML = 
+                    '<option value="">加载失败，请刷新页面重试</option>';
+            }
+        }
+
+        // 选择视频
+        function selectVideo(bvid) {
+            currentBvid = bvid;
+            currentOffset = 0;
+            
+            const video = videosData.find(v => v.bvid === bvid);
+            if (video) {
+                const info = document.getElementById('video-info');
+                info.classList.add('show');
+                
+                document.getElementById('video-title').textContent = video.title;
+                document.getElementById('video-bvid').textContent = video.bvid;
+                document.getElementById('video-count').textContent = video.comment_count || 0;
+                document.getElementById('video-updated').textContent = 
+                    video.last_updated ? new Date(video.last_updated).toLocaleString('zh-CN') : '--';
+                
+                document.getElementById('last-update').textContent = 
+                    '上次更新: ' + (video.last_updated ? new Date(video.last_updated).toLocaleString('zh-CN') : '--');
+            }
+            
+            loadComments();
+        }
+
+        // 加载评论
+        async function loadComments() {
+            if (!currentBvid) return;
+            
+            const btn = document.getElementById('refresh-btn');
+            const list = document.getElementById('comments-list');
+            
+            btn.disabled = true;
+            btn.textContent = '加载中...';
+            
+            if (currentOffset === 0) {
+                list.innerHTML = '<div class="loading">加载中...</div>';
+            }
+            
+            try {
+                const res = await fetch(\`/api/comments/\${currentBvid}?limit=50&offset=\${currentOffset}\`);
+                const json = await res.json();
+                
+                if (json.code !== 0) throw new Error(json.msg);
+                
+                const { total, comments } = json.data;
+                
+                if (currentOffset === 0) {
+                    list.innerHTML = '';
+                }
+                
+                if (comments.length === 0 && currentOffset === 0) {
+                    list.innerHTML = \`
+                        <div class="empty-state">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                            </svg>
+                            <p>暂无评论数据</p>
+                        </div>
+                    \`;
+                    return;
+                }
+                
+                comments.forEach(c => {
+                    const div = document.createElement('div');
+                    div.className = 'comment-item' + (c.root ? ' sub-comment' : '');
+                    div.innerHTML = \`
+                        <div class="comment-header">
+                            <div class="comment-user">
+                                <span class="user-name">\${escapeHtml(c.user)}</span>
+                                <span class="user-level">Lv\${c.level}</span>
+                                \${c.fans_medal ? \`<span class="user-medal">\${escapeHtml(c.fans_medal)}</span>\` : ''}
+                            </div>
+                            <span class="comment-time">\${c.time}</span>
+                        </div>
+                        <div class="comment-content">\${escapeHtml(c.content)}</div>
+                        <div class="comment-footer">
+                            <span>👍 \${c.likes}</span>
+                            <span>💬 \${c.rcount}</span>
+                            \${c.location ? \`<span>📍 \${escapeHtml(c.location)}</span>\` : ''}
+                        </div>
+                    \`;
+                    list.appendChild(div);
+                });
+                
+                // 显示/隐藏加载更多按钮
+                const loadMoreBtn = document.getElementById('load-more');
+                if (currentOffset + comments.length < total) {
+                    loadMoreBtn.style.display = 'block';
+                    loadMoreBtn.textContent = \`加载更多 (\${currentOffset + comments.length}/\${total})\`;
+                } else {
+                    loadMoreBtn.style.display = 'none';
+                }
+                
+            } catch (e) {
+                console.error('加载评论失败:', e);
+                if (currentOffset === 0) {
+                    list.innerHTML = '<div class="loading">加载失败: ' + e.message + '</div>';
+                }
+            } finally {
+                btn.disabled = false;
+                btn.textContent = '🔄 刷新';
+            }
+        }
+
+        // 加载更多
+        function loadMoreComments() {
+            currentOffset += 50;
+            loadComments();
+        }
+
+        // HTML 转义
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // 视频选择事件
+        document.getElementById('video-select').addEventListener('change', (e) => {
+            if (e.target.value) {
+                selectVideo(e.target.value);
+            }
+        });
+
+        // 启动
+        init();
+        
+        // 每分钟自动刷新
+        setInterval(() => {
+            if (currentBvid) {
+                currentOffset = 0;
+                loadComments();
+            }
+        }, 60000);
+    </script>
+</body>
+</html>`;
+}
 
 export default app
