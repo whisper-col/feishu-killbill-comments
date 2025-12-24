@@ -24,12 +24,10 @@ from pymongo import MongoClient
 # ==================== Configuration ====================
 def get_config():
     """从环境变量读取配置"""
-    bvid = os.environ.get("BVID", "")
+    bvid = os.environ.get("BVID", "")  # 可选，如果没有则从 MongoDB 读取
     cookies_json = os.environ.get("COOKIES_JSON", "[]")
     mongo_uri = os.environ.get("MONGO_URI", "")
     
-    if not bvid:
-        raise ValueError("BVID 环境变量未设置")
     if not mongo_uri:
         raise ValueError("MONGO_URI 环境变量未设置")
     
@@ -42,10 +40,32 @@ def get_config():
         raise ValueError("COOKIES_JSON 为空，请配置至少一个账号")
     
     return {
-        "bvid": bvid,
+        "bvid": bvid,  # 可能为空
         "cookies": cookies,
         "mongo_uri": mongo_uri
     }
+
+
+def get_monitor_list(mongo_db, env_bvid: str) -> list:
+    """
+    获取需要监控的 BVID 列表
+    优先从环境变量获取，如果为空则从 MongoDB 的 monitor_config 表获取
+    """
+    if env_bvid:
+        # 环境变量中有 BVID，只监控这一个
+        return [env_bvid]
+    
+    # 从 MongoDB 读取监控列表
+    try:
+        config_coll = mongo_db["monitor_config"]
+        configs = list(config_coll.find({"enabled": True}))
+        bvids = [c["bvid"] for c in configs if c.get("bvid")]
+        print(f"✓ 从 MongoDB 读取到 {len(bvids)} 个监控视频")
+        return bvids
+    except Exception as e:
+        print(f"⚠ 读取监控列表失败: {e}")
+        return []
+
 
 
 # ==================== Credential Pool ====================
@@ -287,16 +307,34 @@ async def main():
         print(f"✗ MongoDB 连接失败: {e}")
         return
     
+    # 获取监控列表
+    bvid_list = get_monitor_list(mongo_db, config["bvid"])
+    
+    if not bvid_list:
+        print("⚠ 没有需要监控的视频，请在 WebUI 中添加")
+        return
+    
+    print(f"\n📋 待抓取视频: {len(bvid_list)} 个")
+    
     # 初始化凭证池
     pool = CredentialPool(config["cookies"])
     
-    # 执行爬虫
-    await crawl_comments(config["bvid"], pool, mongo_db)
+    # 逐个抓取
+    total_saved = 0
+    for i, bvid in enumerate(bvid_list, 1):
+        print(f"\n{'─' * 40}")
+        print(f"[{i}/{len(bvid_list)}] 处理视频: {bvid}")
+        try:
+            saved = await crawl_comments(bvid, pool, mongo_db)
+            total_saved += saved or 0
+        except Exception as e:
+            print(f"✗ 抓取失败: {e}")
     
     print("\n" + "=" * 50)
-    print("✅ 爬虫任务完成")
+    print(f"✅ 爬虫任务完成，共保存 {total_saved} 条评论")
     print("=" * 50)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
+

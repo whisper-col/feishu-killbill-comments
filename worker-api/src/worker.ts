@@ -170,6 +170,61 @@ app.get('/api/video/:bvid', async (c) => {
 });
 
 
+// ==================== 监控列表管理 API ====================
+
+// 获取监控列表
+app.get('/api/monitor', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
+    try {
+        await client.connect();
+        const db = client.db('bilibili_monitor');
+        const configs = await db.collection('monitor_config').find({}).sort({ created_at: -1 }).toArray();
+        return c.json({ code: 0, data: configs.map(c => ({ bvid: c.bvid, title: c.title || '', enabled: c.enabled !== false, created_at: c.created_at })) });
+    } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
+    finally { await client.close(); }
+});
+
+// 添加监控视频
+app.post('/api/monitor', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    const body = await c.req.json();
+    let bvid = body.bvid?.trim();
+    if (!bvid) return c.json({ code: 400, msg: '请输入 BVID' });
+    const match = bvid.match(/BV[a-zA-Z0-9]+/i);
+    if (match) bvid = match[0];
+    if (!/^BV[a-zA-Z0-9]+$/i.test(bvid)) return c.json({ code: 400, msg: '无效的 BVID 格式' });
+    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
+    try {
+        await client.connect();
+        const db = client.db('bilibili_monitor');
+        const existing = await db.collection('monitor_config').findOne({ bvid });
+        if (existing) return c.json({ code: 400, msg: '该视频已在监控列表中' });
+        await db.collection('monitor_config').insertOne({ bvid, title: body.title || '', enabled: true, created_at: new Date() });
+        return c.json({ code: 0, msg: '添加成功', data: { bvid } });
+    } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
+    finally { await client.close(); }
+});
+
+// 删除监控视频
+app.delete('/api/monitor/:bvid', async (c) => {
+    const mongoUri = c.env?.MONGO_URI as string;
+    if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
+    const bvid = c.req.param('bvid');
+    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
+    try {
+        await client.connect();
+        const db = client.db('bilibili_monitor');
+        const result = await db.collection('monitor_config').deleteOne({ bvid });
+        if (result.deletedCount === 0) return c.json({ code: 404, msg: '未找到该视频' });
+        return c.json({ code: 0, msg: '删除成功' });
+    } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
+    finally { await client.close(); }
+});
+
+
 // ==================== 飞书数据连接器 API (保留原有功能) ====================
 
 // 获取视频列表 (飞书用)
@@ -742,7 +797,17 @@ function getIndexHTML(): string {
         </header>
 
         <div class="video-selector">
-            <h3>选择视频</h3>
+            <h3>➕ 添加监控视频</h3>
+            <div style="display:flex;gap:10px;margin-bottom:15px;">
+                <input type="text" id="bvid-input" placeholder="输入 BVID 或视频链接" style="flex:1;padding:12px;border:1px solid rgba(255,255,255,0.2);border-radius:8px;background:rgba(0,0,0,0.3);color:#fff;">
+                <button class="refresh-btn" id="add-btn" onclick="addVideo()">添加</button>
+            </div>
+            <h3 style="margin-top:15px;">📋 监控列表</h3>
+            <div id="monitor-list" style="margin-top:10px;"></div>
+        </div>
+
+        <div class="video-selector">
+            <h3>📺 选择视频查看评论</h3>
             <select id="video-select">
                 <option value="">加载中...</option>
             </select>
@@ -772,10 +837,71 @@ function getIndexHTML(): string {
         let currentBvid = '';
         let currentOffset = 0;
         let videosData = [];
+        let monitorList = [];
 
         // 初始化
         async function init() {
-            await loadVideos();
+            await Promise.all([loadMonitorList(), loadVideos()]);
+        }
+
+        // 加载监控列表
+        async function loadMonitorList() {
+            try {
+                const res = await fetch('/api/monitor');
+                const json = await res.json();
+                if (json.code !== 0) throw new Error(json.msg);
+                monitorList = json.data;
+                renderMonitorList();
+            } catch (e) {
+                document.getElementById('monitor-list').innerHTML = '<div class="loading">加载失败</div>';
+            }
+        }
+
+        // 渲染监控列表
+        function renderMonitorList() {
+            const list = document.getElementById('monitor-list');
+            if (monitorList.length === 0) {
+                list.innerHTML = '<div style="color:#666;padding:10px;">暂无监控视频</div>';
+                return;
+            }
+            list.innerHTML = monitorList.map(m => \`
+                <div style="display:flex;justify-content:space-between;align-items:center;padding:10px;background:rgba(0,0,0,0.2);border-radius:6px;margin-bottom:8px;border-left:3px solid #00d4ff;">
+                    <div>
+                        <div style="color:#00d4ff;font-weight:600;">\${m.bvid}</div>
+                        <div style="color:#666;font-size:0.85rem;">\${m.title || '等待抓取...'}</div>
+                    </div>
+                    <button onclick="removeVideo('\${m.bvid}')" style="background:rgba(255,82,82,0.2);color:#ff5252;border:none;padding:6px 12px;border-radius:4px;cursor:pointer;">删除</button>
+                </div>
+            \`).join('');
+        }
+
+        // 添加监控视频
+        async function addVideo() {
+            const input = document.getElementById('bvid-input');
+            const btn = document.getElementById('add-btn');
+            const bvid = input.value.trim();
+            if (!bvid) { alert('请输入 BVID'); return; }
+            btn.disabled = true; btn.textContent = '添加中...';
+            try {
+                const res = await fetch('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bvid }) });
+                const json = await res.json();
+                if (json.code !== 0) { alert(json.msg); return; }
+                alert('添加成功！将在下次定时任务时抓取');
+                input.value = '';
+                await loadMonitorList();
+            } catch (e) { alert('添加失败'); }
+            finally { btn.disabled = false; btn.textContent = '添加'; }
+        }
+
+        // 删除监控视频
+        async function removeVideo(bvid) {
+            if (!confirm('确定删除 ' + bvid + '？')) return;
+            try {
+                const res = await fetch('/api/monitor/' + bvid, { method: 'DELETE' });
+                const json = await res.json();
+                if (json.code !== 0) { alert(json.msg); return; }
+                await loadMonitorList();
+            } catch (e) { alert('删除失败'); }
         }
 
         // 加载视频列表

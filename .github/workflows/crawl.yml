@@ -26,6 +26,8 @@ jobs:
       - name: 运行爬虫
         run: uv run python crawler.py
         env:
+          # BVID 现在从 WebUI 动态配置，存储在 MongoDB 的 monitor_config 表中
+          # 如果设置了 BVID，则只抓取该视频；否则抓取 MongoDB 中配置的所有视频
           BVID: ${{ secrets.BVID }}
           COOKIES_JSON: ${{ secrets.COOKIES_JSON }}
           MONGO_URI: ${{ secrets.MONGO_URI }}
