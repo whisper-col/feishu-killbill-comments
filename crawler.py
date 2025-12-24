@@ -232,19 +232,31 @@ async def crawl_comments(bvid: str, pool: CredentialPool, mongo_db, fetch_replie
         print(f"✗ 获取视频信息失败: {e}")
         return
     
-    # 2. 抓取主评论
+    # 获取已存在的评论 ID 集合（用于增量抓取）
+    coll_name = f"comments_{bvid}"
+    existing_rpids = set()
+    try:
+        existing_coll = mongo_db[coll_name]
+        cursor = existing_coll.find({}, {"rpid": 1})
+        existing_rpids = {doc["rpid"] for doc in cursor}
+        print(f"✓ 数据库中已有 {len(existing_rpids)} 条评论")
+    except Exception:
+        pass
+    
+    # 2. 抓取主评论（增量模式：遇到旧评论停止）
     all_replies = []
     page = 1
     max_pages = 100
+    found_existing = False
     
-    print("\n📥 正在抓取主评论...")
+    print("\n📥 正在抓取主评论（增量模式）...")
     while page <= max_pages:
         try:
             page_data = await pool.execute_with_retry(
                 comment.get_comments,
                 oid=oid,
                 type_=comment.CommentResourceType.VIDEO,
-                order=comment.OrderType.LIKE,
+                order=comment.OrderType.TIME,  # 按时间排序，便于增量抓取
                 page_index=page
             )
             
@@ -255,8 +267,21 @@ async def crawl_comments(bvid: str, pool: CredentialPool, mongo_db, fetch_replie
             if not replies:
                 break
             
-            all_replies.extend(replies)
-            print(f"  第 {page} 页: {len(replies)} 条 | 累计: {len(all_replies)}/{total_count}")
+            # 检查是否有已存在的评论
+            new_replies = []
+            for reply in replies:
+                if reply['rpid'] in existing_rpids:
+                    found_existing = True
+                    break
+                new_replies.append(reply)
+            
+            all_replies.extend(new_replies)
+            
+            if found_existing:
+                print(f"  第 {page} 页: 发现已存在评论，停止抓取 | 本次新增: {len(all_replies)} 条")
+                break
+            
+            print(f"  第 {page} 页: {len(new_replies)} 条 | 累计: {len(all_replies)}/{total_count}")
             
             if len(all_replies) >= total_count:
                 break
@@ -267,6 +292,9 @@ async def crawl_comments(bvid: str, pool: CredentialPool, mongo_db, fetch_replie
         except Exception as e:
             print(f"  ⚠ 第 {page} 页抓取失败: {e}")
             break
+    
+    if not found_existing and len(all_replies) > 0:
+        print(f"  ✓ 全部抓取完成，共 {len(all_replies)} 条新评论")
     
     # 3. 抓取子评论（如果启用）
     sub_replies_count = 0
