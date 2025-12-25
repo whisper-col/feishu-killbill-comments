@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { basicAuth } from 'hono/basic-auth'
-import { MongoClient } from 'mongodb'
+import { MongoClient, Db } from 'mongodb'
 
 // 定义环境变量类型
 type Bindings = {
@@ -12,13 +12,32 @@ type Bindings = {
     GITHUB_REPO: string;
 }
 
+// ==================== MongoDB 连接管理 ====================
+// 在 Cloudflare Workers 中，每个请求新建连接更可靠
+
+/**
+ * 获取数据库实例（每次新建连接，使用完毕后需要释放）
+ */
+async function getDb(mongoUri: string, dbName: string = 'bilibili_monitor'): Promise<Db> {
+    const client = new MongoClient(mongoUri, {
+        autoEncryption: undefined,
+        monitorCommands: false,
+        connectTimeoutMS: 10000,
+        serverSelectionTimeoutMS: 10000,
+        maxPoolSize: 1,
+    } as any);
+
+    await client.connect();
+    return client.db(dbName);
+}
+
 const app = new Hono<{ Bindings: Bindings }>()
 
 // 启用 CORS
 app.use('*', cors())
 
-// 不需要认证的路由
-const publicRoutes = ['/api/auth/login', '/login', '/meta.json', '/config'];
+// 不需要认证的路由（主页和登录页由前端 JS 处理认证检查）
+const publicRoutes = ['/', '/api/auth/login', '/api/auth/check', '/login', '/meta.json', '/config'];
 
 // Basic Auth 认证（保护 API 路由）
 app.use('*', async (c, next) => {
@@ -39,7 +58,7 @@ app.use('*', async (c, next) => {
     // 检查是否有 Authorization header
     const authHeader = c.req.header('Authorization');
     if (!authHeader) {
-        // 没有认证头，返回 401 让前端处理
+        // API 路由未认证 → 返回 401 JSON
         return c.json({ code: 401, msg: '需要登录' }, 401);
     }
 
@@ -60,15 +79,8 @@ app.get('/api/videos', async (c) => {
         return c.json({ code: 500, msg: 'MONGO_URI not configured' });
     }
 
-    const client = new MongoClient(mongoUri, {
-        autoEncryption: undefined,
-        monitorCommands: false,
-        connectTimeoutMS: 5000,
-    } as any);
-
     try {
-        await client.connect();
-        const db = client.db('bilibili_monitor');
+        const db = await getDb(mongoUri);
         const videos = await db.collection('video_metadata')
             .find({})
             .sort({ last_updated: -1 })
@@ -87,8 +99,6 @@ app.get('/api/videos', async (c) => {
         });
     } catch (e: any) {
         return c.json({ code: 500, msg: e.message });
-    } finally {
-        await client.close();
     }
 });
 
@@ -103,15 +113,8 @@ app.get('/api/comments/:bvid', async (c) => {
     const limit = parseInt(c.req.query('limit') || '50');
     const offset = parseInt(c.req.query('offset') || '0');
 
-    const client = new MongoClient(mongoUri, {
-        autoEncryption: undefined,
-        monitorCommands: false,
-        connectTimeoutMS: 10000,
-    } as any);
-
     try {
-        await client.connect();
-        const db = client.db('bilibili_monitor');
+        const db = await getDb(mongoUri);
         const collName = `comments_${bvid}`;
 
         // 获取评论总数
@@ -149,8 +152,6 @@ app.get('/api/comments/:bvid', async (c) => {
         });
     } catch (e: any) {
         return c.json({ code: 500, msg: e.message });
-    } finally {
-        await client.close();
     }
 });
 
@@ -163,15 +164,8 @@ app.get('/api/video/:bvid', async (c) => {
 
     const bvid = c.req.param('bvid');
 
-    const client = new MongoClient(mongoUri, {
-        autoEncryption: undefined,
-        monitorCommands: false,
-        connectTimeoutMS: 10000,
-    } as any);
-
     try {
-        await client.connect();
-        const db = client.db('bilibili_monitor');
+        const db = await getDb(mongoUri);
 
         // 获取视频元数据
         const metadata = await db.collection('video_metadata').findOne({ bvid });
@@ -208,8 +202,6 @@ app.get('/api/video/:bvid', async (c) => {
         });
     } catch (e: any) {
         return c.json({ code: 500, msg: e.message });
-    } finally {
-        await client.close();
     }
 });
 
@@ -220,14 +212,11 @@ app.get('/api/video/:bvid', async (c) => {
 app.get('/api/cookies', async (c) => {
     const mongoUri = c.env?.MONGO_URI as string;
     if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        const db = client.db('bilibili_monitor');
+        const db = await getDb(mongoUri);
         const cookies = await db.collection('cookie_pool').find({}).toArray();
         return c.json({ code: 0, data: cookies.map((c: any, i: number) => ({ index: i, sessdata_mask: c.sessdata ? c.sessdata.substring(0, 10) + '...' : '', created_at: c.created_at })) });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 // 导入 Cookie 列表（追加）
@@ -237,17 +226,15 @@ app.post('/api/cookies', async (c) => {
     const body = await c.req.json();
     const cookies = body.cookies;
     if (!Array.isArray(cookies) || cookies.length === 0) return c.json({ code: 400, msg: '请提供 Cookie 数组' });
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        const coll = client.db('bilibili_monitor').collection('cookie_pool');
+        const db = await getDb(mongoUri);
+        const coll = db.collection('cookie_pool');
         let addedCount = 0;
         for (const cookie of cookies) {
             if (cookie.sessdata) { await coll.insertOne({ sessdata: cookie.sessdata, buvid3: cookie.buvid3 || '', bili_jct: cookie.bili_jct || '', created_at: new Date() }); addedCount++; }
         }
         return c.json({ code: 0, msg: `成功导入 ${addedCount} 个账号` });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 // 删除单个 Cookie
@@ -255,28 +242,24 @@ app.delete('/api/cookies/:index', async (c) => {
     const mongoUri = c.env?.MONGO_URI as string;
     if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
     const index = parseInt(c.req.param('index'));
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        const cookies = await client.db('bilibili_monitor').collection('cookie_pool').find({}).toArray();
+        const db = await getDb(mongoUri);
+        const cookies = await db.collection('cookie_pool').find({}).toArray();
         if (index < 0 || index >= cookies.length) return c.json({ code: 404, msg: '索引无效' });
-        await client.db('bilibili_monitor').collection('cookie_pool').deleteOne({ _id: cookies[index]._id });
+        await db.collection('cookie_pool').deleteOne({ _id: cookies[index]._id });
         return c.json({ code: 0, msg: '删除成功' });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 // 清空 Cookie 池
 app.delete('/api/cookies', async (c) => {
     const mongoUri = c.env?.MONGO_URI as string;
     if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        await client.db('bilibili_monitor').collection('cookie_pool').deleteMany({});
+        const db = await getDb(mongoUri);
+        await db.collection('cookie_pool').deleteMany({});
         return c.json({ code: 0, msg: '已清空' });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 
@@ -286,13 +269,11 @@ app.delete('/api/cookies', async (c) => {
 app.get('/api/monitor', async (c) => {
     const mongoUri = c.env?.MONGO_URI as string;
     if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        const configs = await client.db('bilibili_monitor').collection('monitor_config').find({}).sort({ created_at: -1 }).toArray();
+        const db = await getDb(mongoUri);
+        const configs = await db.collection('monitor_config').find({}).sort({ created_at: -1 }).toArray();
         return c.json({ code: 0, data: configs.map((c: any) => ({ bvid: c.bvid, title: c.title || '', enabled: c.enabled !== false, created_at: c.created_at })) });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 // 添加监控视频
@@ -305,15 +286,12 @@ app.post('/api/monitor', async (c) => {
     const match = bvid.match(/BV[a-zA-Z0-9]+/i);
     if (match) bvid = match[0];
     if (!/^BV[a-zA-Z0-9]+$/i.test(bvid)) return c.json({ code: 400, msg: '无效的 BVID 格式' });
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        const db = client.db('bilibili_monitor');
+        const db = await getDb(mongoUri);
         if (await db.collection('monitor_config').findOne({ bvid })) return c.json({ code: 400, msg: '该视频已在监控列表中' });
         await db.collection('monitor_config').insertOne({ bvid, title: body.title || '', enabled: true, created_at: new Date() });
         return c.json({ code: 0, msg: '添加成功', data: { bvid } });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 // 删除监控视频
@@ -321,14 +299,12 @@ app.delete('/api/monitor/:bvid', async (c) => {
     const mongoUri = c.env?.MONGO_URI as string;
     if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
     const bvid = c.req.param('bvid');
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        const result = await client.db('bilibili_monitor').collection('monitor_config').deleteOne({ bvid });
+        const db = await getDb(mongoUri);
+        const result = await db.collection('monitor_config').deleteOne({ bvid });
         if (result.deletedCount === 0) return c.json({ code: 404, msg: '未找到该视频' });
         return c.json({ code: 0, msg: '删除成功' });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 // 更新监控状态（启用/禁用）
@@ -337,17 +313,15 @@ app.patch('/api/monitor/:bvid', async (c) => {
     if (!mongoUri) return c.json({ code: 500, msg: 'MONGO_URI not configured' });
     const bvid = c.req.param('bvid');
     const body = await c.req.json();
-    const client = new MongoClient(mongoUri, { autoEncryption: undefined, monitorCommands: false, connectTimeoutMS: 5000 } as any);
     try {
-        await client.connect();
-        const result = await client.db('bilibili_monitor').collection('monitor_config').updateOne(
+        const db = await getDb(mongoUri);
+        const result = await db.collection('monitor_config').updateOne(
             { bvid },
             { $set: { enabled: body.enabled } }
         );
         if (result.matchedCount === 0) return c.json({ code: 404, msg: '未找到该视频' });
         return c.json({ code: 0, msg: body.enabled ? '已启用' : '已暂停' });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
-    finally { await client.close(); }
 });
 
 
@@ -1389,14 +1363,15 @@ function getIndexHTML(): string {
         }
 
         // 带认证的 fetch
+        let redirecting = false;
         async function authFetch(url, options = {}) {
             const headers = { ...getAuthHeaders(), ...(options.headers || {}) };
             const res = await fetch(url, { ...options, headers });
-            if (res.status === 401) {
+            if (res.status === 401 && !redirecting) {
                 // 未认证，跳转登录
+                redirecting = true;
                 sessionStorage.removeItem(AUTH_KEY);
                 window.location.href = '/login';
-                throw new Error('需要登录');
             }
             return res;
         }
@@ -1456,6 +1431,7 @@ function getIndexHTML(): string {
                 const res = await authFetch('/api/run/status');
                 const json = await res.json();
                 const status = document.getElementById('run-status-text');
+                if (!status) return; // 元素不存在时跳过
                 if (!json.data?.configured) {
                     status.textContent = '未配置 Token';
                     return;
@@ -1471,7 +1447,7 @@ function getIndexHTML(): string {
                 } else {
                     status.textContent = '就绪';
                 }
-            } catch (e) { console.error(e); }
+            } catch (e) { console.error('loadRunStatus error:', e); }
         }
 
         // ================= 监控列表管理 =================
