@@ -141,6 +141,32 @@ class CredentialPool:
 
 
 # ==================== MongoDB ====================
+def save_video_stats(mongo_db, bvid: str, video_info: dict, online: int = 0):
+    """保存视频统计数据到 video_stats collection（用于趋势分析）"""
+    try:
+        stats_coll = mongo_db["video_stats"]
+        # 创建索引（仅首次）
+        stats_coll.create_index([("bvid", 1), ("timestamp", -1)])
+        
+        stat = video_info.get("stat", {})
+        doc = {
+            "bvid": bvid,
+            "timestamp": datetime.datetime.utcnow(),
+            "view": stat.get("view", 0),       # 播放量
+            "like": stat.get("like", 0),       # 点赞数
+            "coin": stat.get("coin", 0),       # 投币数
+            "favorite": stat.get("favorite", 0), # 收藏数
+            "share": stat.get("share", 0),     # 分享数
+            "reply": stat.get("reply", 0),     # 评论数
+            "danmaku": stat.get("danmaku", 0), # 弹幕数
+            "online": online,                   # 当前在线观看人数
+        }
+        stats_coll.insert_one(doc)
+        print(f"✓ 已保存视频统计: 播放={doc['view']}, 点赞={doc['like']}, 在线={online}")
+    except Exception as e:
+        print(f"⚠ 保存视频统计失败: {e}")
+
+
 def save_comments_to_mongodb(mongo_db, comments_data: list, bvid: str, oid: int, title: str = ""):
     """保存评论到 MongoDB"""
     if not comments_data:
@@ -228,6 +254,21 @@ async def crawl_comments(bvid: str, pool: CredentialPool, mongo_db, fetch_replie
         oid = info['aid']
         title = info['title']
         print(f"✓ 视频信息: {title} (OID={oid})")
+        
+        # 获取当前在线观看人数
+        online = 0
+        try:
+            async def get_online(credential):
+                v = video.Video(bvid=bvid, credential=credential)
+                return await v.get_online()
+            online_data = await pool.execute_with_retry(get_online)
+            online = online_data.get('total', 0)
+            print(f"✓ 当前在线: {online} 人")
+        except Exception as e:
+            print(f"⚠ 获取在线人数失败: {e}")
+        
+        # 保存视频统计数据（趋势分析用）
+        save_video_stats(mongo_db, bvid, info, online)
     except Exception as e:
         print(f"✗ 获取视频信息失败: {e}")
         return

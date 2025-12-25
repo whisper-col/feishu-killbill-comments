@@ -286,11 +286,17 @@ app.post('/api/monitor', async (c) => {
     const match = bvid.match(/BV[a-zA-Z0-9]+/i);
     if (match) bvid = match[0];
     if (!/^BV[a-zA-Z0-9]+$/i.test(bvid)) return c.json({ code: 400, msg: '无效的 BVID 格式' });
+
     try {
         const db = await getDb(mongoUri);
-        if (await db.collection('monitor_config').findOne({ bvid })) return c.json({ code: 400, msg: '该视频已在监控列表中' });
-        await db.collection('monitor_config').insertOne({ bvid, title: body.title || '', enabled: true, created_at: new Date() });
-        return c.json({ code: 0, msg: '添加成功', data: { bvid } });
+        if (await db.collection('monitor_config').findOne({ bvid })) {
+            return c.json({ code: 400, msg: '该视频已在监控列表中' });
+        }
+
+        const title = body.title?.trim() || '';
+        const newMonitor = { bvid, title, enabled: true, created_at: new Date() };
+        await db.collection('monitor_config').insertOne(newMonitor);
+        return c.json({ code: 0, msg: '添加成功', data: { bvid, title } });
     } catch (e: any) { return c.json({ code: 500, msg: e.message }); }
 });
 
@@ -1299,11 +1305,13 @@ function getIndexHTML(): string {
         </header>
 
         <div class="video-selector">
-            <h3 style="display:flex;justify-content:space-between;align-items:center;">📋 监控管理 <label style="font-weight:normal;font-size:0.9rem;color:#888;display:flex;align-items:center;gap:5px;"><input type="checkbox" id="fetch-replies" checked> 抓取回复</label></h3>
-            <div style="display:flex;gap:10px;margin-bottom:15px;">
+            <h3>📋 监控管理</h3>
+            <div style="display:flex;gap:10px;margin-bottom:10px;">
                 <input type="text" id="bvid-input" placeholder="输入 BVID 或视频链接" style="flex:1;padding:12px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#fff;">
                 <button class="refresh-btn" onclick="addMonitor()">添加</button>
             </div>
+            <input type="text" id="title-input" placeholder="视频名称（可选）" style="width:100%;padding:10px;background:rgba(0,0,0,0.3);border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#fff;margin-bottom:10px;box-sizing:border-box;">
+            <label style="font-weight:normal;font-size:0.9rem;color:#888;display:flex;align-items:center;gap:5px;margin-bottom:15px;"><input type="checkbox" id="fetch-replies" checked> 抓取回复</label>
             <div id="monitor-list" style="max-height:150px;overflow-y:auto;"></div>
         </div>
 
@@ -1322,12 +1330,6 @@ function getIndexHTML(): string {
             <select id="video-select">
                 <option value="">加载中...</option>
             </select>
-            <div class="video-info" id="video-info">
-                <h4 id="video-title">--</h4>
-                <p>BVID: <span id="video-bvid">--</span></p>
-                <p>评论数: <span id="video-count">--</span></p>
-                <p>最后更新: <span id="video-updated">--</span></p>
-            </div>
         </div>
 
         <div class="comments-section">
@@ -1463,15 +1465,19 @@ function getIndexHTML(): string {
                 }
                 list.innerHTML = json.data.map(m => {
                     const enabled = m.enabled !== false;
-                    const statusText = enabled ? (m.title || '等待抓取') : '已暂停';
-                    const statusColor = enabled ? '#666' : '#ff9800';
+                    const statusText = enabled ? '运行中' : '已暂停';
+                    const statusColor = enabled ? '#4CAF50' : '#ff9800';
+                    const hasTitle = m.title && m.title.length > 0;
                     const pauseBtn = enabled 
                         ? '<button style="background:rgba(255,152,0,0.2);color:#ff9800;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;" onclick="toggleMonitor(\\'' + m.bvid + '\\', false)">⏸️</button>'
                         : '<button style="background:rgba(76,175,80,0.2);color:#4CAF50;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;" onclick="toggleMonitor(\\'' + m.bvid + '\\', true)">▶️</button>';
                     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px;background:rgba(0,0,0,0.2);border-radius:6px;margin-bottom:6px;">' +
-                        '<div><span style="color:#00d4ff;font-weight:600;">' + m.bvid + '</span>' +
-                        '<span style="color:' + statusColor + ';margin-left:10px;font-size:0.85rem;">' + statusText + '</span></div>' +
-                        '<div style="display:flex;gap:5px;">' +
+                        '<div style="flex:1;min-width:0;">' +
+                        (hasTitle 
+                            ? '<div style="color:#fff;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="' + m.title + '">' + m.title + '</div><div style="font-size:0.8rem;"><span style="color:#00d4ff;">' + m.bvid + '</span> <span style="color:' + statusColor + ';margin-left:8px;">' + statusText + '</span></div>'
+                            : '<div style="color:#00d4ff;font-weight:500;">' + m.bvid + ' <span style="color:' + statusColor + ';font-weight:normal;">' + statusText + '</span></div>') +
+                        '</div>' +
+                        '<div style="display:flex;gap:5px;flex-shrink:0;">' +
                         '<button style="background:rgba(0,212,255,0.2);color:#00d4ff;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;" onclick="runSingle(\\'' + m.bvid + '\\')">🚀</button>' +
                         pauseBtn +
                         '<button style="background:rgba(255,82,82,0.2);color:#ff5252;border:none;padding:4px 8px;border-radius:4px;cursor:pointer;" onclick="removeMonitor(\\'' + m.bvid + '\\')">🗑️</button>' +
@@ -1482,18 +1488,30 @@ function getIndexHTML(): string {
 
         async function addMonitor() {
             const input = document.getElementById('bvid-input');
+            const titleInput = document.getElementById('title-input');
+            const btn = document.querySelector('.video-selector .refresh-btn');
             let bvid = input.value.trim();
             if (!bvid) { alert('请输入 BVID'); return; }
             const match = bvid.match(/BV[a-zA-Z0-9]+/i);
             if (match) bvid = match[0];
+            const title = titleInput.value.trim();
+            
+            btn.disabled = true;
+            btn.textContent = '添加中...';
+            
             try {
-                const res = await authFetch('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bvid }) });
+                const res = await authFetch('/api/monitor', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ bvid, title }) });
                 const json = await res.json();
                 if (json.code !== 0) { alert(json.msg); return; }
-                alert('添加成功！点击 🚀 立即抓取');
                 input.value = '';
+                titleInput.value = '';
+                // 立即刷新列表
                 await loadMonitorList();
-            } catch (e) { alert('添加失败'); }
+            } catch (e) { alert('添加失败: ' + e.message); }
+            finally {
+                btn.disabled = false;
+                btn.textContent = '添加';
+            }
         }
 
         async function removeMonitor(bvid) {
@@ -1662,23 +1680,6 @@ function getIndexHTML(): string {
         function selectVideo(bvid) {
             currentBvid = bvid;
             currentOffset = 0;
-            
-            const video = videosData.find(v => v.bvid === bvid);
-            if (video) {
-                const info = document.getElementById('video-info');
-                if (info) info.classList.add('show');
-                
-                const titleEl = document.getElementById('video-title');
-                const bvidEl = document.getElementById('video-bvid');
-                const countEl = document.getElementById('video-count');
-                const updatedEl = document.getElementById('video-updated');
-                
-                if (titleEl) titleEl.textContent = video.title;
-                if (bvidEl) bvidEl.textContent = video.bvid;
-                if (countEl) countEl.textContent = video.comment_count || 0;
-                if (updatedEl) updatedEl.textContent = video.last_updated ? new Date(video.last_updated).toLocaleString('zh-CN') : '--';
-            }
-            
             loadComments();
         }
 
